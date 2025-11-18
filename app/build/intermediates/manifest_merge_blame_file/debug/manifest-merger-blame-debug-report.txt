@@ -1,0 +1,101 @@
+1<?xml version="1.0" encoding="utf-8"?>
+2<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+3    package="se.fpq.remote.test"
+4    android:versionCode="1"
+5    android:versionName="1.0" >
+6
+7    <uses-sdk
+8        android:minSdkVersion="24"
+9        android:targetSdkVersion="34" />
+10
+11    <uses-permission android:name="android.permission.INTERNET" />
+11-->C:\Source\spotify-remote-test\app\src\main\AndroidManifest.xml:4:5-67
+11-->C:\Source\spotify-remote-test\app\src\main\AndroidManifest.xml:4:22-64
+12    <uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE" />
+12-->C:\Source\spotify-remote-test\app\src\main\AndroidManifest.xml:5:5-80
+12-->C:\Source\spotify-remote-test\app\src\main\AndroidManifest.xml:5:22-77
+13    <uses-permission android:name="android.permission.WRITE_EXTERNAL_STORAGE" />
+13-->C:\Source\spotify-remote-test\app\src\main\AndroidManifest.xml:6:5-81
+13-->C:\Source\spotify-remote-test\app\src\main\AndroidManifest.xml:6:22-78
+14
+15    <!-- Required for Android 11+ to query Spotify app -->
+16    <queries>
+16-->C:\Source\spotify-remote-test\app\src\main\AndroidManifest.xml:9:5-11:15
+17        <package android:name="com.spotify.music" />
+17-->C:\Source\spotify-remote-test\app\src\main\AndroidManifest.xml:10:9-53
+17-->C:\Source\spotify-remote-test\app\src\main\AndroidManifest.xml:10:18-50
+18        <package android:name="com.spotify.music.debug" />
+18-->[spotify-app-remote-release-0.8.0.aar] C:\Users\fpalmqv\.gradle\caches\8.13\transforms\7952fbaba0dda0872eeb9bb63eb3f104\transformed\jetified-spotify-app-remote-release-0.8.0\AndroidManifest.xml:29:9-59
+18-->[spotify-app-remote-release-0.8.0.aar] C:\Users\fpalmqv\.gradle\caches\8.13\transforms\7952fbaba0dda0872eeb9bb63eb3f104\transformed\jetified-spotify-app-remote-release-0.8.0\AndroidManifest.xml:29:18-56
+19        <package android:name="com.spotify.music.canary" />
+19-->[spotify-app-remote-release-0.8.0.aar] C:\Users\fpalmqv\.gradle\caches\8.13\transforms\7952fbaba0dda0872eeb9bb63eb3f104\transformed\jetified-spotify-app-remote-release-0.8.0\AndroidManifest.xml:30:9-60
+19-->[spotify-app-remote-release-0.8.0.aar] C:\Users\fpalmqv\.gradle\caches\8.13\transforms\7952fbaba0dda0872eeb9bb63eb3f104\transformed\jetified-spotify-app-remote-release-0.8.0\AndroidManifest.xml:30:18-57
+20        <package android:name="com.spotify.music.partners" />
+20-->[spotify-app-remote-release-0.8.0.aar] C:\Users\fpalmqv\.gradle\caches\8.13\transforms\7952fbaba0dda0872eeb9bb63eb3f104\transformed\jetified-spotify-app-remote-release-0.8.0\AndroidManifest.xml:31:9-62
+20-->[spotify-app-remote-release-0.8.0.aar] C:\Users\fpalmqv\.gradle\caches\8.13\transforms\7952fbaba0dda0872eeb9bb63eb3f104\transformed\jetified-spotify-app-remote-release-0.8.0\AndroidManifest.xml:31:18-59
+21    </queries>
+22
+23    <application
+23-->C:\Source\spotify-remote-test\app\src\main\AndroidManifest.xml:13:5-38:19
+24        android:allowBackup="false"
+24-->C:\Source\spotify-remote-test\app\src\main\AndroidManifest.xml:14:9-36
+25        android:appComponentFactory="androidx.core.app.CoreComponentFactory"
+25-->[androidx.core:core:1.5.0] C:\Users\fpalmqv\.gradle\caches\8.13\transforms\4e3a972015fbc8bed0e897174b956ebc\transformed\core-1.5.0\AndroidManifest.xml:24:18-86
+26        android:debuggable="true"
+27        android:exported="true"
+27-->C:\Source\spotify-remote-test\app\src\main\AndroidManifest.xml:18:9-32
+28        android:extractNativeLibs="false"
+29        android:label="@string/app_name"
+29-->C:\Source\spotify-remote-test\app\src\main\AndroidManifest.xml:15:9-41
+30        android:supportsRtl="false"
+30-->C:\Source\spotify-remote-test\app\src\main\AndroidManifest.xml:16:9-36
+31        android:theme="@style/AppTheme" >
+31-->C:\Source\spotify-remote-test\app\src\main\AndroidManifest.xml:17:9-40
+32        <activity
+32-->C:\Source\spotify-remote-test\app\src\main\AndroidManifest.xml:20:9-36:20
+33            android:name="se.fpq.remote.test.MainActivity"
+33-->C:\Source\spotify-remote-test\app\src\main\AndroidManifest.xml:21:13-41
+34            android:exported="true" >
+34-->C:\Source\spotify-remote-test\app\src\main\AndroidManifest.xml:22:13-36
+35            <intent-filter>
+35-->C:\Source\spotify-remote-test\app\src\main\AndroidManifest.xml:23:13-26:29
+36                <action android:name="android.intent.action.MAIN" />
+36-->C:\Source\spotify-remote-test\app\src\main\AndroidManifest.xml:24:17-69
+36-->C:\Source\spotify-remote-test\app\src\main\AndroidManifest.xml:24:25-66
+37
+38                <category android:name="android.intent.category.LAUNCHER" />
+38-->C:\Source\spotify-remote-test\app\src\main\AndroidManifest.xml:25:17-77
+38-->C:\Source\spotify-remote-test\app\src\main\AndroidManifest.xml:25:27-74
+39            </intent-filter>
+40            <!-- Handle Spotify App Remote redirect URI callback -->
+41            <intent-filter>
+41-->C:\Source\spotify-remote-test\app\src\main\AndroidManifest.xml:28:13-35:29
+42                <action android:name="android.intent.action.VIEW" />
+42-->C:\Source\spotify-remote-test\app\src\main\AndroidManifest.xml:29:17-69
+42-->C:\Source\spotify-remote-test\app\src\main\AndroidManifest.xml:29:25-66
+43
+44                <category android:name="android.intent.category.DEFAULT" />
+44-->C:\Source\spotify-remote-test\app\src\main\AndroidManifest.xml:30:17-76
+44-->C:\Source\spotify-remote-test\app\src\main\AndroidManifest.xml:30:27-73
+45                <category android:name="android.intent.category.BROWSABLE" />
+45-->C:\Source\spotify-remote-test\app\src\main\AndroidManifest.xml:31:17-78
+45-->C:\Source\spotify-remote-test\app\src\main\AndroidManifest.xml:31:27-75
+46
+47                <data
+47-->C:\Source\spotify-remote-test\app\src\main\AndroidManifest.xml:32:17-34:59
+48                    android:host="callback"
+48-->C:\Source\spotify-remote-test\app\src\main\AndroidManifest.xml:33:21-44
+49                    android:scheme="se.fpq.remote.test" />
+49-->C:\Source\spotify-remote-test\app\src\main\AndroidManifest.xml:34:21-56
+50            </intent-filter>
+51        </activity>
+52        <activity
+52-->[com.spotify.android:auth:1.2.3] C:\Users\fpalmqv\.gradle\caches\8.13\transforms\b99f35ed4f23b15adb4775e3aaadb2f2\transformed\jetified-auth-1.2.3\AndroidManifest.xml:34:9-37:20
+53            android:name="com.spotify.sdk.android.auth.LoginActivity"
+53-->[com.spotify.android:auth:1.2.3] C:\Users\fpalmqv\.gradle\caches\8.13\transforms\b99f35ed4f23b15adb4775e3aaadb2f2\transformed\jetified-auth-1.2.3\AndroidManifest.xml:35:13-70
+54            android:theme="@android:style/Theme.Translucent.NoTitleBar" >
+54-->[com.spotify.android:auth:1.2.3] C:\Users\fpalmqv\.gradle\caches\8.13\transforms\b99f35ed4f23b15adb4775e3aaadb2f2\transformed\jetified-auth-1.2.3\AndroidManifest.xml:36:13-72
+55        </activity>
+56    </application>
+57
+58</manifest>
