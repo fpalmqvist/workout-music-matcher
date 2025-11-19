@@ -242,38 +242,33 @@ class PlaylistGenerationFragment : Fragment() {
                 }.toMutableMap()  // Convert to mutable so we can update BPM values
                 Log.d(TAG, "✅ Got audio features for ${audioFeatures.size} tracks (using defaults for missing)")
                 
-                // Enrich audio features with BPM data from GetSongKEY BEFORE generating playlist
-                Log.d(TAG, "🔍 Enriching audio features with BPM data from GetSongKEY...")
-                val songKeyService = GetSongKeyService(requireContext())
+                // Enrich audio features with BPM data from ReccoBeats BEFORE generating playlist
+                Log.d(TAG, "🔍 Enriching audio features with BPM data from ReccoBeats API...")
+                val reccoBeatsService = ReccoBeatsService.getInstance(requireContext())
                 var enrichedCount = 0
-                var skippedCount = 0
                 
-                // Limit to first 50 tracks to avoid rate limiting (3000 requests/hour = ~50 per minute)
-                val tracksToEnrich = savedTracks.take(50)
-                
-                for (track in tracksToEnrich) {
-                    val artist = track.artist?.name ?: "Unknown"
-                    val trackName = track.name ?: "Unknown"
+                try {
+                    // Get track IDs for ReccoBeats API
+                    val trackIds = savedTracks.map { track -> track.id }
                     
-                    try {
-                        // Use runBlocking since getBPMForTrack is a suspend function
-                        val bpm = kotlinx.coroutines.runBlocking {
-                            songKeyService.getBPMForTrack(artist, trackName)
-                        }
-                        if (bpm != null && bpm > 0) {
-                            val existingFeatures = audioFeatures[track.id]
-                            if (existingFeatures != null) {
-                                audioFeatures[track.id] = existingFeatures.copy(bpm = bpm)
-                                enrichedCount++
-                                Log.d(TAG, "  ✅ Enriched: $trackName - $bpm BPM")
-                            }
-                        }
-                    } catch (e: Exception) {
-                        Log.d(TAG, "  ⚠️ Could not fetch BPM for $trackName: ${e.message}")
-                        skippedCount++
+                    // Fetch audio features from ReccoBeats (no API key needed!)
+                    val reccoFeatures = kotlinx.coroutines.runBlocking {
+                        reccoBeatsService.getAudioFeatures(trackIds)
                     }
+                    
+                    // Update audio features with ReccoBeats data (BPM + other features)
+                    for ((trackId, features) in reccoFeatures) {
+                        val existingFeatures = audioFeatures[trackId]
+                        if (existingFeatures != null && features.tempo != null && features.tempo > 0) {
+                            audioFeatures[trackId] = existingFeatures.copy(bpm = features.tempo.toInt())
+                            enrichedCount++
+                            Log.d(TAG, "  ✅ Enriched: $trackId - ${features.tempo.toInt()} BPM")
+                        }
+                    }
+                    Log.d(TAG, "✅ BPM enrichment complete: $enrichedCount/${savedTracks.size} tracks enriched (${reccoBeatsService.getCacheStats()})")
+                } catch (e: Exception) {
+                    Log.w(TAG, "⚠️ ReccoBeats enrichment failed: ${e.message}, continuing with defaults")
                 }
-                Log.d(TAG, "✅ BPM enrichment complete: $enrichedCount tracks enriched, $skippedCount skipped (API rate limit protection)")
                 
                 Log.d(TAG, "🎵 Generating playlist using PlaylistGenerationEngine...")
                 val engine = PlaylistGenerationEngine()
@@ -307,10 +302,12 @@ class PlaylistGenerationFragment : Fragment() {
                 }
                 
                 workoutTracks.forEachIndexed { idx, track ->
-                    Log.d(TAG, "  Track $idx: ${track.blockName} (${track.bpm} BPM) - ${track.trackUri}")
+                    val bpmStr = if (track.bpm != null && track.bpm > 0) "${track.bpm} BPM" else "no data"
+                    Log.d(TAG, "  Track $idx: ${track.blockName} ($bpmStr) - ${track.trackUri}")
                 }
                 
                 activity.currentPlaylist = workoutTracks
+                activity.currentGeneratedPlaylist = generatedPlaylist  // Store for substitution
                 activity.showPlaybackFragment(workoutTracks)
             } catch (e: Exception) {
                 Log.e(TAG, "❌ Error generating playlist: ${e.message}", e)

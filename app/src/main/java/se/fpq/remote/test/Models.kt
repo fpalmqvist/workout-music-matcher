@@ -55,14 +55,17 @@ data class PlaylistTrackSelection(
     val startTime: Int,
     val endTime: Int,
     val clipStart: Int,
-    val clipEnd: Int
+    val clipEnd: Int,
+    val alternatives: List<SpotifyTrack> = emptyList()  // Alternative tracks for substitution
 )
 
 data class GeneratedPlaylist(
     val trackSelections: List<PlaylistTrackSelection>,
     val totalDuration: Int,
     val workoutId: String,
-    val workoutName: String
+    val workoutName: String,
+    val sourceAllTracks: List<SpotifyTrack> = emptyList(),  // Full enriched source list for substitution
+    val trackFeatures: Map<String, SpotifyAudioFeatures> = emptyMap()  // BPM/features for all tracks
 ) {
     val tracks: List<SpotifyTrack>
         get() = trackSelections.map { it.track }

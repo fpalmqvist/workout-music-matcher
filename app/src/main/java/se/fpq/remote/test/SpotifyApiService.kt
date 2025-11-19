@@ -202,16 +202,16 @@ class SpotifyApiService(private val accessToken: String) {
             Log.d(TAG, "ℹ️ Spotify audio-features endpoint deprecated (Nov 27, 2024). Using default BPM values.")
             
             // For each track, create audio features with default/estimated values
-            tracks.forEach { track ->
-                val audioFeatures = SpotifyAudioFeatures(
-                    id = track.id,
-                    bpm = 100,  // Default BPM - can be enriched via GetSongKEY API
-                    energy = 0.5f,
-                    danceability = 0.5f,
-                    valence = 0.5f
-                )
-                features[track.id] = audioFeatures
-            }
+                tracks.forEach { track ->
+                    val audioFeatures = SpotifyAudioFeatures(
+                        id = track.id,
+                        bpm = -1,  // -1 = no BPM data available (can be enriched via ReccoBeats API)
+                        energy = 0.5f,
+                        danceability = 0.5f,
+                        valence = 0.5f
+                    )
+                    features[track.id] = audioFeatures
+                }
             
             Log.d(TAG, "✅ Created audio features for ${features.size} tracks (using defaults)")
             Result.success(features)

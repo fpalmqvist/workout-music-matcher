@@ -1,8 +1,0 @@
-R_DEF: Internal format may change without notice
-local
-color black
-color green
-id fragment_container
-layout activity_main
-string app_name
-style AppTheme

@@ -25,6 +25,10 @@ class MainActivity : FragmentActivity() {
     
     var currentWorkout: Workout? = null
     var currentPlaylist: List<WorkoutTrack> = emptyList()
+    var currentGeneratedPlaylist: GeneratedPlaylist? = null
+    var shouldResumePlayback = false  // Flag to resume playback after reconnection
+    var onConnectionRestored: (() -> Unit)? = null  // Callback to resync playback after reconnection
+    var wasDisconnectedBeforeResume = false  // Track if we were actually disconnected when Fragment resumed
     
     private val sharedPref by lazy {
         getSharedPreferences("spotify_remote_prefs", android.content.Context.MODE_PRIVATE)
@@ -87,21 +91,42 @@ class MainActivity : FragmentActivity() {
         }
     }
 
+    override fun onPause() {
+        super.onPause()
+        // Pause playback when leaving the app to avoid errors
+        Log.d(TAG, "⏸️ Pausing playback (app going to background)")
+        spotifyAppRemote?.playerApi?.pause()
+    }
+
     override fun onResume() {
         super.onResume()
-        // Check if we need to reconnect to Spotify App Remote
+        // Reconnect to Spotify App Remote when returning to foreground
         if (!isAppRemoteConnected) {
+            Log.d(TAG, "🔄 App resumed - reconnecting to Spotify...")
             connectToSpotifyAppRemote()
         }
+    }
+    
+    /**
+     * Resume playback after reconnection
+     * Called by PlaybackFragment when it detects we're back in foreground
+     */
+    fun resumeWorkoutPlayback() {
+        Log.d(TAG, "▶️ Resuming workout playback...")
+        spotifyAppRemote?.playerApi?.resume()
     }
 
     override fun onStop() {
         super.onStop()
-        SpotifyAppRemote.disconnect(spotifyAppRemote)
-        isAppRemoteConnected = false
+        // Gracefully disconnect when activity stops
+        if (spotifyAppRemote != null) {
+            SpotifyAppRemote.disconnect(spotifyAppRemote)
+            isAppRemoteConnected = false
+            Log.d(TAG, "👋 Disconnected from Spotify App Remote")
+        }
     }
 
-    private fun connectToSpotifyAppRemote() {
+    fun connectToSpotifyAppRemote() {
         if (isAppRemoteConnected) {
             Log.d(TAG, "Already connected to Spotify App Remote")
             return
@@ -115,11 +140,21 @@ class MainActivity : FragmentActivity() {
             .build()
 
         SpotifyAppRemote.connect(this, connectionParams, object : Connector.ConnectionListener {
-            override fun onConnected(spotifyAppRemote: SpotifyAppRemote) {
-                this@MainActivity.spotifyAppRemote = spotifyAppRemote
-                this@MainActivity.isAppRemoteConnected = true
-                Log.d(TAG, "✅ Connected to Spotify App Remote!")
-            }
+                override fun onConnected(spotifyAppRemote: SpotifyAppRemote) {
+                    this@MainActivity.spotifyAppRemote = spotifyAppRemote
+                    this@MainActivity.isAppRemoteConnected = true
+                    Log.d(TAG, "✅ Connected to Spotify App Remote!")
+                    
+                    // If we need to resume playback after reconnection AND were actually disconnected, do it now
+                    if (shouldResumePlayback && wasDisconnectedBeforeResume) {
+                        Log.d(TAG, "▶️ Resuming playback after reconnection...")
+                        // Call the callback to resync playback to the correct track
+                        onConnectionRestored?.invoke()
+                        shouldResumePlayback = false
+                        wasDisconnectedBeforeResume = false
+                        onConnectionRestored = null
+                    }
+                }
 
             override fun onFailure(throwable: Throwable) {
                 this@MainActivity.isAppRemoteConnected = false

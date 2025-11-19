@@ -12,6 +12,9 @@ import android.widget.TextView
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.fragment.app.Fragment
 import java.io.File
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
 
 class WorkoutSelectionFragment : Fragment() {
     companion object {
@@ -27,6 +30,8 @@ class WorkoutSelectionFragment : Fragment() {
                 if (inputStream != null) {
                     val result = ZwoWorkoutParser.parse(inputStream)
                     result.onSuccess { workout: Workout ->
+                        // Save the workout file
+                        saveWorkoutFile(uri, workout)
                         // Navigate to playlist generation
                         val activity = requireActivity() as MainActivity
                         activity.showPlaylistGenerationFragment(workout)
@@ -112,7 +117,7 @@ class WorkoutSelectionFragment : Fragment() {
                 ).apply {
                     bottomMargin = 16
                 }
-                setOnClickListener { filePicker.launch("*/*") }
+                setOnClickListener { filePicker.launch("*/*") }  // File picker will check for .zwo extension
                 setBackgroundColor(android.graphics.Color.parseColor("#03DAC6"))
             })
         }
@@ -129,6 +134,20 @@ class WorkoutSelectionFragment : Fragment() {
         } ?: emptyArray()
 
         savedWorkoutsContainer.removeAllViews()
+
+        if (workoutFiles.isEmpty()) {
+            savedWorkoutsContainer.addView(TextView(requireContext()).apply {
+                text = "No saved workouts yet"
+                layoutParams = LinearLayout.LayoutParams(
+                    ViewGroup.LayoutParams.MATCH_PARENT,
+                    ViewGroup.LayoutParams.WRAP_CONTENT
+                ).apply {
+                    topMargin = 16
+                }
+                textSize = 14f
+            })
+            return
+        }
 
         workoutFiles.forEach { file ->
             try {
@@ -154,6 +173,48 @@ class WorkoutSelectionFragment : Fragment() {
             } catch (e: Exception) {
                 Log.e(TAG, "Error loading workout: ${e.message}")
             }
+        }
+    }
+
+    private fun saveWorkoutFile(uri: android.net.Uri, workout: Workout) {
+        try {
+            val inputStream = requireContext().contentResolver.openInputStream(uri)
+            if (inputStream != null) {
+                // Get filename from URI
+                val fileName = getFileNameFromUri(uri) ?: "workout_${System.currentTimeMillis()}.zwo"
+                
+                // Ensure it ends with .zwo
+                val cleanFileName = if (fileName.endsWith(".zwo")) fileName else "$fileName.zwo"
+                
+                val cacheFile = File(requireContext().cacheDir, cleanFileName)
+                
+                // Copy file to cache
+                inputStream.use { input ->
+                    cacheFile.outputStream().use { output ->
+                        input.copyTo(output)
+                    }
+                }
+                
+                Log.d(TAG, "✅ Saved workout: $cleanFileName")
+                
+                // Refresh the list
+                loadSavedWorkouts()
+            }
+        } catch (e: Exception) {
+            Log.e(TAG, "Error saving workout: ${e.message}")
+        }
+    }
+
+    private fun getFileNameFromUri(uri: android.net.Uri): String? {
+        return try {
+            val cursor = requireContext().contentResolver.query(uri, null, null, null, null)
+            cursor?.use {
+                val nameIndex = it.getColumnIndex(android.provider.OpenableColumns.DISPLAY_NAME)
+                it.moveToFirst()
+                it.getString(nameIndex)
+            }
+        } catch (e: Exception) {
+            null
         }
     }
 }

@@ -1,0 +1,113 @@
+# Gradle files
+.gradle/
+build/
+*.apk
+*.ap_
+*.aab
+
+# Local configuration file (sdk path, etc)
+local.properties
+
+# Log/OS files
+*.log
+.DS_Store
+Thumbs.db
+
+# Android Studio
+.idea/
+.idea_modules/
+*.iml
+*.iws
+*.ipr
+*.swp
+*~
+
+# AS specific (bin, res-cache, output.json, etc.)
+.metadata
+bin/
+gen/
+out/
+.classpath
+.project
+.settings/
+.toolbarstate
+.navigation/
+
+# Signing files
+*.keystore
+*.jks
+*.p12
+*.pfx
+
+# User-specific stuff
+.idea/workspace.xml
+.idea/tasks.xml
+.idea/gradle.xml
+.idea/dictionaries
+.idea/vcs.xml
+.idea/jsLibraryMappings.xml
+.idea/shelf
+.idea/misc.xml
+.idea/modules.xml
+
+# Generated files
+gen/
+out/
+
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Distribution / packaging
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# Firebase
+google-services.json
+
+# Environment
+.env
+.env.local
+
+# macOS
+.AppleDouble
+.AppleDB
+._*
+
+# Linux
+.directory
+
+# Editor backups
+*.bak
+*.swp
+*.swo
+*~
+
+# Misc
+.cache
+.gradle
+.DS_Store
+local.properties
+
+# Lint
+lint-results.xml
+lint-results-debug.html
+
+# Android
+.android/
+

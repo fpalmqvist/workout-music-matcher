@@ -35,33 +35,10 @@ class PlaylistGenerationEngine {
             // Sort all tracks by BPM relevance instead of filtering them out
             val sortedTracks = if (targetCadence != null) {
                 availableTracks.sortedBy { track ->
-                    val features = trackFeatures[track.id]
-                    if (features == null) {
-                        // Tracks without BPM data get lowest priority
-                        Int.MAX_VALUE
-                    } else {
-                        // Calculate BPM distance (lower is better)
-                        val tolerance = (targetCadence * 20) / 100
-                        val distance = when {
-                            // Perfect match (within tight tolerance)
-                            features.bpm in (targetCadence - tolerance)..(targetCadence + tolerance) -> 
-                                Math.abs(features.bpm - targetCadence)
-                            // Harmonic match (2x or 0.5x BPM)
-                            features.bpm in ((targetCadence * 2) - tolerance * 2)..((targetCadence * 2) + tolerance * 2) ->
-                                Math.abs(features.bpm - (targetCadence * 2)) + 1000
-                            features.bpm in ((targetCadence / 2) - tolerance)..((targetCadence / 2) + tolerance) ->
-                                Math.abs(features.bpm - (targetCadence / 2)) + 1000
-                            // Close match (within 25% tolerance)
-                            features.bpm in (targetCadence * 0.75).toInt()..(targetCadence * 1.25).toInt() ->
-                                Math.abs(features.bpm - targetCadence) + 2000
-                            // All other tracks
-                            else -> Math.abs(features.bpm - targetCadence) + 5000
-                        }
-                        distance
-                    }
+                    calculateBpmScore(track, targetCadence, trackFeatures)
                 }
             } else {
-                // No target cadence, use all tracks without sorting
+                // No target cadence, use all tracks without sorting (use them all equally)
                 availableTracks
             }
             
@@ -100,7 +77,9 @@ class PlaylistGenerationEngine {
                 trackSelections = playlistTracks,
                 totalDuration = workoutElapsedTime,
                 workoutId = workout.id,
-                workoutName = workout.name
+                workoutName = workout.name,
+                sourceAllTracks = availableTracks,  // Store full source for substitution
+                trackFeatures = trackFeatures  // Store features for BPM matching
             )
         )
     } catch (e: Exception) {
@@ -121,7 +100,7 @@ class PlaylistGenerationEngine {
         
         log("🔍 selectTracksForBlock: availableTracks=${availableTracks.size}, usedTrackIds=${usedTrackIds.size}, blockDuration=${blockDuration}s, offset=${globalTrackIndexOffset}")
         
-        // First pass: try to use only unused tracks
+        // First pass: try to use only unused tracks (sorted by BPM match quality)
         var tracksToUse = availableTracks.filterNot { it.id in usedTrackIds }
         log("   Unused tracks: ${tracksToUse.size} (${tracksToUse.map { it.name }.take(3).joinToString(", ")}${if (tracksToUse.size > 3) "..." else ""})")
         
@@ -131,69 +110,122 @@ class PlaylistGenerationEngine {
             tracksToUse = availableTracks
         }
         
-        // Start from the global offset to ensure round-robin across blocks
-        // Use the ORIGINAL availableTracks list size for offset calculation to stay consistent
-        val startIndex = globalTrackIndexOffset % availableTracks.size
-        var trackIndex = startIndex
-        var cycleCount = 0
+        // For initial selection, pick sequentially from the best matches
+        // This ensures we get the best-matching tracks for this block's cadence
+        var trackIndex = 0
         var tracksAdded = 0
-        var startedCycle = false
         
-        while (remainingDuration > 0 && tracksToUse.isNotEmpty()) {
-            val track = tracksToUse[trackIndex % tracksToUse.size]
+        while (remainingDuration > 0 && trackIndex < tracksToUse.size) {
+            val track = tracksToUse[trackIndex]
             val trackDurationMs = track.durationMs
             val trackDurationSec = trackDurationMs / 1000
             
             log("   Trying track[${trackIndex % tracksToUse.size}]: '${track.name}' (${trackDurationSec}s, need ${remainingDuration}s)")
             
             if (trackDurationSec <= remainingDuration) {
+                // Get top 3 alternative tracks
+                val alternatives = getAlternativeTracks(track, tracksToUse, 3)
+                
                 selectedTracks.add(
                     PlaylistTrackSelection(
                         track = track,
                         startTime = blockStartTime,
                         endTime = blockStartTime + trackDurationSec,
                         clipStart = 0,
-                        clipEnd = trackDurationSec
+                        clipEnd = trackDurationSec,
+                        alternatives = alternatives
                     )
                 )
-                log("   ✅ Added: '${track.name}'")
+                log("   ✅ Added: '${track.name}' (${alternatives.size} alternatives available)")
                 blockStartTime += trackDurationSec
                 remainingDuration -= trackDurationSec
                 tracksAdded++
             } else if (remainingDuration >= 30) {
+                // Get top 3 alternative tracks
+                val alternatives = getAlternativeTracks(track, tracksToUse, 3)
+                
                 selectedTracks.add(
                     PlaylistTrackSelection(
                         track = track,
                         startTime = blockStartTime,
                         endTime = blockStartTime + remainingDuration,
                         clipStart = 0,
-                        clipEnd = remainingDuration
+                        clipEnd = remainingDuration,
+                        alternatives = alternatives
                     )
                 )
-                log("   ✅ Added (clipped): '${track.name}' (${remainingDuration}s)")
+                log("   ✅ Added (clipped): '${track.name}' (${remainingDuration}s, ${alternatives.size} alternatives available)")
                 blockStartTime += remainingDuration
                 remainingDuration = 0
                 tracksAdded++
             }
             
-            trackIndex = (trackIndex + 1) % tracksToUse.size
-            
-            // Check if we've completed a cycle through tracksToUse
-            if (trackIndex == startIndex && startedCycle) {
-                cycleCount++
-                log("   🔄 Cycle ${cycleCount}: completed pass through all tracks")
-                // Don't cycle more than twice through the same set
-                if (cycleCount >= 2) {
-                    log("   ⛔ Breaking: reached max cycles (2)")
-                    break
-                }
-            }
-            startedCycle = true
+            trackIndex++
         }
         
-        log("   📊 Selected ${tracksAdded} tracks for block, next offset will be $trackIndex")
+        log("   📊 Selected ${tracksAdded} tracks for block")
         
         return Pair(selectedTracks, trackIndex)
+    }
+    
+    /**
+     * Get the next best alternative tracks, excluding the current track
+     */
+    private fun getAlternativeTracks(
+        currentTrack: SpotifyTrack,
+        availableTracks: List<SpotifyTrack>,
+        maxCount: Int
+    ): List<SpotifyTrack> {
+        return availableTracks
+            .filterNot { it.id == currentTrack.id }  // Exclude current track
+            .take(maxCount)  // Get top maxCount alternatives (they're already sorted by BPM match)
+    }
+    
+    /**
+     * Calculate BPM score for a track (lower is better)
+     * All multiples are treated equally: 75 BPM matches 75 RPM same as 150 BPM matches 75 RPM
+     */
+    private fun calculateBpmScore(
+        track: SpotifyTrack,
+        targetCadence: Int,
+        trackFeatures: Map<String, SpotifyAudioFeatures>
+    ): Int {
+        val features = trackFeatures[track.id]
+        
+        if (features == null || features.bpm < 0) {
+            return Int.MAX_VALUE / 2  // Penalize missing BPM heavily
+        }
+        
+        val tolerance = (targetCadence * 25) / 100  // 25% tolerance
+        val multipliers = listOf(1, 2, 3, 4)
+        var bestDistance = Int.MAX_VALUE
+        
+        // Find best match among all multiples
+        for (multiplier in multipliers) {
+            val targetBpm = targetCadence * multiplier
+            val matchTolerance = tolerance * multiplier
+            
+            if (features.bpm in (targetBpm - matchTolerance)..(targetBpm + matchTolerance)) {
+                // Match found! Score is pure distance, no multiplier penalty
+                val distance = Math.abs(features.bpm - targetBpm)
+                
+                if (distance < bestDistance) {
+                    bestDistance = distance
+                }
+            }
+        }
+        
+        // If found a multiple match, return its score
+        if (bestDistance != Int.MAX_VALUE) {
+            return bestDistance
+        }
+        
+        // No multiple match - penalize heavily as fallback
+        return when {
+            features.bpm in (targetCadence * 0.75).toInt()..(targetCadence * 1.25).toInt() ->
+                Math.abs(features.bpm - targetCadence) + 30000
+            else -> Math.abs(features.bpm - targetCadence) + 35000
+        }
     }
 }
 
