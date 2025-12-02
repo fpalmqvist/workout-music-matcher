@@ -29,6 +29,7 @@ class MainActivity : FragmentActivity() {
     var shouldResumePlayback = false  // Flag to resume playback after reconnection
     var onConnectionRestored: (() -> Unit)? = null  // Callback to resync playback after reconnection
     var wasDisconnectedBeforeResume = false  // Track if we were actually disconnected when Fragment resumed
+    var isWorkoutPlaying = false  // Track if workout playback is active
     
     private val sharedPref by lazy {
         getSharedPreferences("spotify_remote_prefs", android.content.Context.MODE_PRIVATE)
@@ -93,13 +94,25 @@ class MainActivity : FragmentActivity() {
 
     override fun onPause() {
         super.onPause()
-        // Pause playback when leaving the app to avoid errors
-        Log.d(TAG, "⏸️ Pausing playback (app going to background)")
-        spotifyAppRemote?.playerApi?.pause()
+        // Only pause playback if NOT in a workout
+        // During workouts, we want continuous playback even if screen dims or app goes background
+        if (!isWorkoutPlaying) {
+            Log.d(TAG, "⏸️ Pausing playback (app going to background)")
+            spotifyAppRemote?.playerApi?.pause()
+        } else {
+            Log.d(TAG, "🏃 Workout playing - keeping Spotify playback active in background")
+        }
+        // Disable screen on flag when leaving (OS will handle screen based on settings)
+        window.clearFlags(android.view.WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
     }
 
     override fun onResume() {
         super.onResume()
+        // Keep screen on during workout playback
+        if (isWorkoutPlaying) {
+            Log.d(TAG, "💡 Keeping screen on during workout")
+            window.addFlags(android.view.WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+        }
         // Reconnect to Spotify App Remote when returning to foreground
         if (!isAppRemoteConnected) {
             Log.d(TAG, "🔄 App resumed - reconnecting to Spotify...")
@@ -118,11 +131,14 @@ class MainActivity : FragmentActivity() {
 
     override fun onStop() {
         super.onStop()
-        // Gracefully disconnect when activity stops
-        if (spotifyAppRemote != null) {
+        // Only disconnect if NOT in a workout
+        // Keep connection alive during workouts so transitions work in background
+        if (!isWorkoutPlaying && spotifyAppRemote != null) {
             SpotifyAppRemote.disconnect(spotifyAppRemote)
             isAppRemoteConnected = false
             Log.d(TAG, "👋 Disconnected from Spotify App Remote")
+        } else if (isWorkoutPlaying) {
+            Log.d(TAG, "🏃 Workout in progress - keeping Spotify connection alive")
         }
     }
 

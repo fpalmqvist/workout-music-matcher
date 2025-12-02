@@ -3,6 +3,7 @@ package se.fpq.remote.test
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
+import android.os.PowerManager
 import android.util.Log
 import android.view.LayoutInflater
 import android.view.View
@@ -11,6 +12,7 @@ import android.widget.Button
 import android.widget.LinearLayout
 import android.widget.ScrollView
 import android.widget.TextView
+import android.graphics.drawable.GradientDrawable
 import androidx.fragment.app.Fragment
 
 class PlaybackFragment : Fragment() {
@@ -34,6 +36,13 @@ class PlaybackFragment : Fragment() {
     
     // Map of track index to cadence (for substitution logic)
     private val trackCadences = mutableMapOf<Int, Int?>()
+    
+    // Absolute workout start time (milliseconds since system boot)
+    // This is used for accurate timing that doesn't drift across track transitions
+    private var workoutStartTimeMs: Long = 0L
+    
+    // WakeLock to keep CPU awake during workouts (so transitions work even with screen off)
+    private var wakeLock: PowerManager.WakeLock? = null
 
     override fun onCreateView(
         inflater: LayoutInflater,
@@ -224,6 +233,85 @@ class PlaybackFragment : Fragment() {
         }
     }
     
+    /**
+     * Convert dp to pixels for responsive sizing
+     */
+    private fun dpToPx(dp: Int): Int {
+        return (dp * requireContext().resources.displayMetrics.density).toInt()
+    }
+
+    /**
+     * Maps power percentage to Zwift zone color
+     */
+    private fun getPowerZoneColor(powerPercent: Int): Int {
+        return when {
+            powerPercent < 60 -> android.graphics.Color.parseColor("#808080")    // Grey - Recovery
+            powerPercent < 76 -> android.graphics.Color.parseColor("#0066CC")    // Blue - Endurance
+            powerPercent < 90 -> android.graphics.Color.parseColor("#00BB00")    // Green - Tempo
+            powerPercent < 105 -> android.graphics.Color.parseColor("#FFFF00")   // Yellow - Threshold
+            powerPercent < 119 -> android.graphics.Color.parseColor("#FF9900")   // Orange - VO2 Max
+            else -> android.graphics.Color.parseColor("#FF0000")                 // Red - Anaerobic
+        }
+    }
+
+    /**
+     * Creates a gradient drawable for power ranges (Warmup, Cooldown, Ramp)
+     */
+    private fun createGradientDrawable(powerLowPercent: Int, powerHighPercent: Int): GradientDrawable {
+        val colorLow = getPowerZoneColor(powerLowPercent)
+        val colorHigh = getPowerZoneColor(powerHighPercent)
+        
+        return GradientDrawable().apply {
+            colors = intArrayOf(colorLow, colorHigh)
+            orientation = GradientDrawable.Orientation.LEFT_RIGHT
+            cornerRadius = 0f
+        }
+    }
+
+    /**
+     * Get the power level for a track based on its timing and the current workout
+     */
+    private fun getPowerForTrack(track: WorkoutTrack): Int {
+        val activity = requireActivity() as MainActivity
+        val workout = activity.currentWorkout ?: return 50
+        
+        // Find which block this track belongs to by matching its start time
+        // Calculate cumulative time through blocks
+        var cumulativeTimeMs = 0
+        for (block in workout.blocks) {
+            val blockStartMs = cumulativeTimeMs
+            val blockEndMs = cumulativeTimeMs + block.duration * 1000
+            
+            // Check if this track's start time falls within this block
+            if (track.startTimeMs >= blockStartMs && track.startTimeMs < blockEndMs) {
+                return when (block) {
+                    is WorkoutBlock.Warmup -> {
+                        // For warmup/cooldown/ramp, use average of low and high
+                        ((block.powerLow + block.powerHigh) / 2.0 * 100).toInt()
+                    }
+                    is WorkoutBlock.SteadyState -> {
+                        (block.power * 100).toInt()
+                    }
+                    is WorkoutBlock.Cooldown -> {
+                        ((block.powerLow + block.powerHigh) / 2.0 * 100).toInt()
+                    }
+                    is WorkoutBlock.Interval -> {
+                        (block.power * 100).toInt()
+                    }
+                    is WorkoutBlock.Ramp -> {
+                        ((block.powerLow + block.powerHigh) / 2.0 * 100).toInt()
+                    }
+                    is WorkoutBlock.Freeride -> {
+                        50  // Neutral
+                    }
+                }
+            }
+            
+            cumulativeTimeMs = blockEndMs
+        }
+        return 50  // Default if no matching block found
+    }
+
     private fun displayTracks(tracks: List<WorkoutTrack>) {
         tracksContainer.removeAllViews()
         trackInfo.text = "Tracks: 1/${tracks.size}"
@@ -235,116 +323,152 @@ class PlaybackFragment : Fragment() {
             val durationSecRem = durationSec % 60
             val durationStr = String.format("%d:%02d", durationMin, durationSecRem)
             
-            val containerLayout = LinearLayout(requireContext()).apply {
-                orientation = LinearLayout.VERTICAL
-                layoutParams = LinearLayout.LayoutParams(
-                    ViewGroup.LayoutParams.MATCH_PARENT,
-                    ViewGroup.LayoutParams.WRAP_CONTENT
-                ).apply {
-                    bottomMargin = 8
-                    marginStart = 12
-                    marginEnd = 12
+            // Get power from the workout block
+            val powerPercent = getPowerForTrack(track)
+            val powerZoneColor = getPowerZoneColor(powerPercent)
+            
+            // Determine if this is a ramp block (needs gradient)
+            val activity = requireActivity() as MainActivity
+            val workout = activity.currentWorkout
+            var isRampBlock = false
+            var powerLow = 0
+            var powerHigh = 0
+            
+            if (workout != null) {
+                var cumulativeTimeMs = 0
+                for (block in workout.blocks) {
+                    val blockStartMs = cumulativeTimeMs
+                    val blockEndMs = cumulativeTimeMs + block.duration * 1000
+                    
+                    if (track.startTimeMs >= blockStartMs && track.startTimeMs < blockEndMs) {
+                        when (block) {
+                            is WorkoutBlock.Warmup, is WorkoutBlock.Cooldown, is WorkoutBlock.Ramp -> {
+                                isRampBlock = true
+                                powerLow = when (block) {
+                                    is WorkoutBlock.Warmup -> (block.powerLow * 100).toInt()
+                                    is WorkoutBlock.Cooldown -> (block.powerLow * 100).toInt()
+                                    is WorkoutBlock.Ramp -> (block.powerLow * 100).toInt()
+                                    else -> 0
+                                }
+                                powerHigh = when (block) {
+                                    is WorkoutBlock.Warmup -> (block.powerHigh * 100).toInt()
+                                    is WorkoutBlock.Cooldown -> (block.powerHigh * 100).toInt()
+                                    is WorkoutBlock.Ramp -> (block.powerHigh * 100).toInt()
+                                    else -> 0
+                                }
+                            }
+                            else -> {}
+                        }
+                        break
+                    }
+                    cumulativeTimeMs = blockEndMs
                 }
-                if (index == 0) {
-                    setBackgroundColor(android.graphics.Color.parseColor("#6200EE"))
-                } else {
-                    setBackgroundColor(android.graphics.Color.parseColor("#E8E8E8"))
-                }
-                setPadding(12, 12, 12, 12)
             }
             
-            // Track info row (name, duration, BPM)
-            val infoLayout = LinearLayout(requireContext()).apply {
+            // Determine text color based on background brightness
+            val textColor = if (powerPercent < 76) android.graphics.Color.WHITE else android.graphics.Color.BLACK
+            
+            val containerLayout = LinearLayout(requireContext()).apply {
                 orientation = LinearLayout.HORIZONTAL
                 layoutParams = LinearLayout.LayoutParams(
                     ViewGroup.LayoutParams.MATCH_PARENT,
                     ViewGroup.LayoutParams.WRAP_CONTENT
-                )
+                ).apply {
+                    bottomMargin = dpToPx(12)
+                    marginStart = dpToPx(12)
+                    marginEnd = dpToPx(12)
+                }
+                
+                // Use gradient for ramp blocks, solid color otherwise
+                if (isRampBlock) {
+                    background = createGradientDrawable(powerLow, powerHigh)
+                } else {
+                    setBackgroundColor(powerZoneColor)
+                }
+                
+                setPadding(dpToPx(12), dpToPx(12), dpToPx(12), dpToPx(12))
+                gravity = android.view.Gravity.CENTER_VERTICAL
             }
             
-            // Track name
-            infoLayout.addView(TextView(requireContext()).apply {
+            // Track name (flexible, takes most space)
+            containerLayout.addView(TextView(requireContext()).apply {
                 text = "${index + 1}. ${track.blockName}"
                 textSize = 14f
+                setTypeface(typeface, android.graphics.Typeface.BOLD)
                 layoutParams = LinearLayout.LayoutParams(
                     0,
                     ViewGroup.LayoutParams.WRAP_CONTENT,
                     1f
                 )
-                if (index == 0) {
-                    setTextColor(android.graphics.Color.WHITE)
-                } else {
-                    setTextColor(android.graphics.Color.BLACK)
-                }
+                setTextColor(textColor)
             })
             
-            // Duration
-            infoLayout.addView(TextView(requireContext()).apply {
-                text = durationStr
-                textSize = 14f
+            // Duration and BPM stacked vertically (right-aligned with fixed width)
+            val metaLayout = LinearLayout(requireContext()).apply {
+                orientation = LinearLayout.VERTICAL
                 layoutParams = LinearLayout.LayoutParams(
-                    ViewGroup.LayoutParams.WRAP_CONTENT,
+                    dpToPx(70),  // Fixed width for alignment
                     ViewGroup.LayoutParams.WRAP_CONTENT
                 ).apply {
-                    marginStart = 16
+                    marginStart = dpToPx(12)
+                    marginEnd = dpToPx(12)
                 }
-                if (index == 0) {
-                    setTextColor(android.graphics.Color.WHITE)
-                } else {
-                    setTextColor(android.graphics.Color.BLACK)
-                }
+            }
+            
+            // Duration (on top, right-aligned)
+            metaLayout.addView(TextView(requireContext()).apply {
+                text = durationStr
+                textSize = 13f
+                layoutParams = LinearLayout.LayoutParams(
+                    ViewGroup.LayoutParams.MATCH_PARENT,
+                    ViewGroup.LayoutParams.WRAP_CONTENT
+                )
+                textAlignment = android.view.View.TEXT_ALIGNMENT_TEXT_END
+                setTextColor(textColor)
             })
             
-            // BPM (only show if available, not -1)
+            // BPM (on bottom, only if available, right-aligned)
             if (track.bpm != null && track.bpm > 0) {
-                infoLayout.addView(TextView(requireContext()).apply {
+                metaLayout.addView(TextView(requireContext()).apply {
                     text = "${track.bpm} BPM"
-                    textSize = 14f
+                    textSize = 11f
                     layoutParams = LinearLayout.LayoutParams(
-                        ViewGroup.LayoutParams.WRAP_CONTENT,
+                        ViewGroup.LayoutParams.MATCH_PARENT,
                         ViewGroup.LayoutParams.WRAP_CONTENT
-                    ).apply {
-                        marginStart = 12
-                    }
-                    if (index == 0) {
-                        setTextColor(android.graphics.Color.WHITE)
-                    } else {
-                        setTextColor(android.graphics.Color.BLACK)
-                    }
+                    )
+                    textAlignment = android.view.View.TEXT_ALIGNMENT_TEXT_END
+                    setTextColor(textColor)
                 })
             }
             
-            containerLayout.addView(infoLayout)
+            containerLayout.addView(metaLayout)
             
-            // Substitute button row (if there are alternatives available)
-            // Note: We'll need to pass alternatives from PlaylistGenerationFragment
-            // For now, just add a placeholder substitute button
-            val buttonLayout = LinearLayout(requireContext()).apply {
-                orientation = LinearLayout.HORIZONTAL
-                layoutParams = LinearLayout.LayoutParams(
-                    ViewGroup.LayoutParams.MATCH_PARENT,
-                    ViewGroup.LayoutParams.WRAP_CONTENT
-                ).apply {
-                    topMargin = 8
-                }
+            // Substitute button with light blue background
+            val buttonSize = dpToPx(60)
+            val buttonDrawable = android.graphics.drawable.GradientDrawable().apply {
+                setColor(android.graphics.Color.parseColor("#87CEEB"))  // Light blue
+                cornerRadius = dpToPx(6).toFloat()
             }
             
-            buttonLayout.addView(Button(requireContext()).apply {
-                text = "🔄 Next Match"
-                textSize = 12f
+            containerLayout.addView(Button(requireContext()).apply {
+                text = "↻"  // Modern refresh arrow symbol
+                textSize = 24f
                 layoutParams = LinearLayout.LayoutParams(
-                    ViewGroup.LayoutParams.MATCH_PARENT,
-                    ViewGroup.LayoutParams.WRAP_CONTENT,
-                    1f
-                )
-                setBackgroundColor(if (index == 0) android.graphics.Color.parseColor("#4CAF50") else android.graphics.Color.parseColor("#2196F3"))
-                setTextColor(android.graphics.Color.WHITE)
+                    buttonSize,
+                    buttonSize
+                ).apply {
+                    marginEnd = dpToPx(4)
+                }
+                background = buttonDrawable
+                setTextColor(android.graphics.Color.BLACK)
+                setPadding(0, 0, 0, 0)
+                gravity = android.view.Gravity.CENTER
+                isAllCaps = false
                 setOnClickListener {
                     substituteTrack(index, track)
                 }
             })
             
-            containerLayout.addView(buttonLayout)
             tracksContainer.addView(containerLayout)
         }
     }
@@ -373,19 +497,46 @@ class PlaybackFragment : Fragment() {
         currentTrackIndex = 0
         playButton.isEnabled = false
         pauseButton.isEnabled = true
+        
+        // Flag that we're in a workout to prevent app pause from stopping playback
+        activity.isWorkoutPlaying = true
+        // Keep screen on during workout
+        activity.window.addFlags(android.view.WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+        
+        // Acquire WakeLock to keep CPU awake even with screen off
+        // This ensures transitions work even when screen is off
+        try {
+            if (wakeLock?.isHeld == false || wakeLock == null) {
+                val powerManager = requireContext().getSystemService(android.content.Context.POWER_SERVICE) as PowerManager
+                wakeLock = powerManager.newWakeLock(
+                    PowerManager.PARTIAL_WAKE_LOCK,
+                    "WorkoutMusicMatcher:WorkoutPlayback"
+                ).apply {
+                    acquire(Long.MAX_VALUE)  // Hold indefinitely until released
+                    Log.d(TAG, "🔋 WakeLock acquired - CPU will stay awake during workout")
+                }
+            }
+        } catch (e: Exception) {
+            Log.e(TAG, "Error acquiring WakeLock", e)
+        }
 
         val firstTrack = tracks[0]
         activity.spotifyAppRemote!!.playerApi.play(firstTrack.trackUri)
             .setResultCallback {
                 Log.d(TAG, "▶️ Started playback: ${firstTrack.blockName}")
                 spotifyCurrentTrackUri = firstTrack.trackUri  // Spotify is now playing this track
-                startWorkoutTimer(tracks)
+                // Only start timer if not already running (to preserve workout start time)
+                if (workoutStartTimeMs == 0L) {
+                    startWorkoutTimer(tracks)
+                }
             }
             .setErrorCallback { error ->
                 Log.e(TAG, "❌ Playback error: ${error.message}")
                 playButton.isEnabled = true
                 pauseButton.isEnabled = false
                 isPlaying = false
+                activity.isWorkoutPlaying = false
+                activity.window.clearFlags(android.view.WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
             }
     }
 
@@ -407,11 +558,30 @@ class PlaybackFragment : Fragment() {
         val activity = requireActivity() as MainActivity
         activity.spotifyAppRemote?.playerApi?.pause()
         stopWorkoutTimer()
+        isPlaying = false
+        activity.isWorkoutPlaying = false
+        activity.window.clearFlags(android.view.WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+        
+        // Release WakeLock so CPU can sleep normally
+        try {
+            if (wakeLock?.isHeld == true) {
+                wakeLock?.release()
+                Log.d(TAG, "🔋 WakeLock released - CPU can sleep normally")
+            }
+        } catch (e: Exception) {
+            Log.e(TAG, "Error releasing WakeLock", e)
+        }
+        
+        Log.d(TAG, "⏹️ Playback stopped - screen can dim normally")
     }
 
     private fun startWorkoutTimer(tracks: List<WorkoutTrack>) {
+        // CRITICAL FIX: Record absolute workout start time
+        // This prevents timing drift across track transitions by using absolute time
+        // instead of per-track elapsed time
+        workoutStartTimeMs = System.currentTimeMillis()
+        
         workoutTimerRunnable = object : Runnable {
-            private var elapsedTime = 0L
             private var isFading = false
 
             override fun run() {
@@ -422,10 +592,12 @@ class PlaybackFragment : Fragment() {
                     return
                 }
 
+                // CRITICAL FIX: Use absolute time from workout start, not per-track time
+                val workoutElapsedTimeMs = System.currentTimeMillis() - workoutStartTimeMs
                 val currentTrack = tracks[currentTrackIndex]
-                val trackDuration = (currentTrack.endTimeMs - currentTrack.startTimeMs).toLong()
 
-                if (elapsedTime >= trackDuration && !isFading) {
+                // Check if we've reached the end time of the current track (absolute time from workout start)
+                if (workoutElapsedTimeMs >= currentTrack.endTimeMs && !isFading) {
                     isFading = true
                     currentTrackIndex++
                     trackInfo.text = "Tracks: ${currentTrackIndex + 1}/${tracks.size}"
@@ -456,13 +628,11 @@ class PlaybackFragment : Fragment() {
                             // Spotify is still playing the old track (no update to spotifyCurrentTrackUri)
                         }
 
-                        elapsedTime = 0
                         isFading = false
                         updateTrackDisplay()
                     }
                 }
 
-                elapsedTime += 100
                 workoutTimerHandler?.postDelayed(this, 100)
             }
         }
@@ -495,114 +665,158 @@ class PlaybackFragment : Fragment() {
                 generatedPlaylist?.trackFeatures?.get(trackId)?.bpm
             }
             
-            val containerLayout = LinearLayout(requireContext()).apply {
-                orientation = LinearLayout.VERTICAL
-                layoutParams = LinearLayout.LayoutParams(
-                    ViewGroup.LayoutParams.MATCH_PARENT,
-                    ViewGroup.LayoutParams.WRAP_CONTENT
-                ).apply {
-                    bottomMargin = 8
-                    marginStart = 12
-                    marginEnd = 12
-                }
-                if (index == currentTrackIndex) {
-                    setBackgroundColor(android.graphics.Color.parseColor("#6200EE"))
-                } else {
-                    setBackgroundColor(android.graphics.Color.parseColor("#E8E8E8"))
-                }
-                setPadding(12, 12, 12, 12)
+            // Get power from the workout block for color coding
+            val powerPercent = getPowerForTrack(track)
+            val powerZoneColor = if (index == currentTrackIndex) {
+                android.graphics.Color.parseColor("#6200EE")  // Current track highlight
+            } else {
+                getPowerZoneColor(powerPercent)
             }
             
-            // Track info row (name, duration, BPM)
-            val infoLayout = LinearLayout(requireContext()).apply {
+            // Determine if this is a ramp block (needs gradient)
+            var isRampBlock = false
+            var powerLow = 0
+            var powerHigh = 0
+            
+            if (index != currentTrackIndex && activity.currentWorkout != null) {
+                var cumulativeTimeMs = 0
+                for (block in activity.currentWorkout!!.blocks) {
+                    val blockStartMs = cumulativeTimeMs
+                    val blockEndMs = cumulativeTimeMs + block.duration * 1000
+                    
+                    if (track.startTimeMs >= blockStartMs && track.startTimeMs < blockEndMs) {
+                        when (block) {
+                            is WorkoutBlock.Warmup, is WorkoutBlock.Cooldown, is WorkoutBlock.Ramp -> {
+                                isRampBlock = true
+                                powerLow = when (block) {
+                                    is WorkoutBlock.Warmup -> (block.powerLow * 100).toInt()
+                                    is WorkoutBlock.Cooldown -> (block.powerLow * 100).toInt()
+                                    is WorkoutBlock.Ramp -> (block.powerLow * 100).toInt()
+                                    else -> 0
+                                }
+                                powerHigh = when (block) {
+                                    is WorkoutBlock.Warmup -> (block.powerHigh * 100).toInt()
+                                    is WorkoutBlock.Cooldown -> (block.powerHigh * 100).toInt()
+                                    is WorkoutBlock.Ramp -> (block.powerHigh * 100).toInt()
+                                    else -> 0
+                                }
+                            }
+                            else -> {}
+                        }
+                        break
+                    }
+                    cumulativeTimeMs = blockEndMs
+                }
+            }
+            
+            // Determine text color based on background brightness
+            val textColor = if (index == currentTrackIndex || powerPercent < 76) {
+                android.graphics.Color.WHITE
+            } else {
+                android.graphics.Color.BLACK
+            }
+            
+            val containerLayout = LinearLayout(requireContext()).apply {
                 orientation = LinearLayout.HORIZONTAL
                 layoutParams = LinearLayout.LayoutParams(
                     ViewGroup.LayoutParams.MATCH_PARENT,
                     ViewGroup.LayoutParams.WRAP_CONTENT
-                )
+                ).apply {
+                    bottomMargin = dpToPx(12)
+                    marginStart = dpToPx(12)
+                    marginEnd = dpToPx(12)
+                }
+                
+                // Use gradient for ramp blocks (only when not current track), solid color otherwise
+                if (isRampBlock && index != currentTrackIndex) {
+                    background = createGradientDrawable(powerLow, powerHigh)
+                } else {
+                    setBackgroundColor(powerZoneColor)
+                }
+                
+                setPadding(dpToPx(12), dpToPx(12), dpToPx(12), dpToPx(12))
+                gravity = android.view.Gravity.CENTER_VERTICAL
             }
             
-            // Track name
-            infoLayout.addView(TextView(requireContext()).apply {
+            // Track name (flexible, takes most space)
+            containerLayout.addView(TextView(requireContext()).apply {
                 text = "${index + 1}. ${track.blockName}"
                 textSize = 14f
+                setTypeface(typeface, android.graphics.Typeface.BOLD)
                 layoutParams = LinearLayout.LayoutParams(
                     0,
                     ViewGroup.LayoutParams.WRAP_CONTENT,
                     1f
                 )
-                if (index == currentTrackIndex) {
-                    setTextColor(android.graphics.Color.WHITE)
-                } else {
-                    setTextColor(android.graphics.Color.BLACK)
-                }
+                setTextColor(textColor)
             })
             
-            // Duration
-            infoLayout.addView(TextView(requireContext()).apply {
-                text = durationStr
-                textSize = 14f
+            // Duration and BPM stacked vertically (right-aligned with fixed width)
+            val metaLayout = LinearLayout(requireContext()).apply {
+                orientation = LinearLayout.VERTICAL
                 layoutParams = LinearLayout.LayoutParams(
-                    ViewGroup.LayoutParams.WRAP_CONTENT,
+                    dpToPx(70),  // Fixed width for alignment
                     ViewGroup.LayoutParams.WRAP_CONTENT
                 ).apply {
-                    marginStart = 16
+                    marginStart = dpToPx(12)
+                    marginEnd = dpToPx(12)
                 }
-                if (index == currentTrackIndex) {
-                    setTextColor(android.graphics.Color.WHITE)
-                } else {
-                    setTextColor(android.graphics.Color.BLACK)
-                }
+            }
+            
+            // Duration (on top, right-aligned)
+            metaLayout.addView(TextView(requireContext()).apply {
+                text = durationStr
+                textSize = 13f
+                layoutParams = LinearLayout.LayoutParams(
+                    ViewGroup.LayoutParams.MATCH_PARENT,
+                    ViewGroup.LayoutParams.WRAP_CONTENT
+                )
+                textAlignment = android.view.View.TEXT_ALIGNMENT_TEXT_END
+                setTextColor(textColor)
             })
             
-            // BPM (only show if available, not -1)
+            // BPM (on bottom, only if available, right-aligned)
             if (bpm != null && bpm > 0) {
-                infoLayout.addView(TextView(requireContext()).apply {
+                metaLayout.addView(TextView(requireContext()).apply {
                     text = "$bpm BPM"
-                    textSize = 14f
+                    textSize = 11f
                     layoutParams = LinearLayout.LayoutParams(
-                        ViewGroup.LayoutParams.WRAP_CONTENT,
+                        ViewGroup.LayoutParams.MATCH_PARENT,
                         ViewGroup.LayoutParams.WRAP_CONTENT
-                    ).apply {
-                        marginStart = 12
-                    }
-                    if (index == currentTrackIndex) {
-                        setTextColor(android.graphics.Color.WHITE)
-                    } else {
-                        setTextColor(android.graphics.Color.BLACK)
-                    }
+                    )
+                    textAlignment = android.view.View.TEXT_ALIGNMENT_TEXT_END
+                    setTextColor(textColor)
                 })
             }
             
-            containerLayout.addView(infoLayout)
+            containerLayout.addView(metaLayout)
             
-            // Substitute button row
-            val buttonLayout = LinearLayout(requireContext()).apply {
-                orientation = LinearLayout.HORIZONTAL
-                layoutParams = LinearLayout.LayoutParams(
-                    ViewGroup.LayoutParams.MATCH_PARENT,
-                    ViewGroup.LayoutParams.WRAP_CONTENT
-                ).apply {
-                    topMargin = 8
-                }
+            // Substitute button with light blue background
+            val buttonSize = dpToPx(60)
+            val buttonDrawable = android.graphics.drawable.GradientDrawable().apply {
+                setColor(android.graphics.Color.parseColor("#87CEEB"))  // Light blue
+                cornerRadius = dpToPx(6).toFloat()
             }
             
-            buttonLayout.addView(Button(requireContext()).apply {
-                text = "🔄 Next Match"
-                textSize = 12f
+            containerLayout.addView(Button(requireContext()).apply {
+                text = "↻"  // Modern refresh arrow symbol
+                textSize = 24f
                 layoutParams = LinearLayout.LayoutParams(
-                    ViewGroup.LayoutParams.MATCH_PARENT,
-                    ViewGroup.LayoutParams.WRAP_CONTENT,
-                    1f
-                )
-                setBackgroundColor(if (index == currentTrackIndex) android.graphics.Color.parseColor("#4CAF50") else android.graphics.Color.parseColor("#2196F3"))
-                setTextColor(android.graphics.Color.WHITE)
+                    buttonSize,
+                    buttonSize
+                ).apply {
+                    marginEnd = dpToPx(4)
+                }
+                background = buttonDrawable
+                setTextColor(android.graphics.Color.BLACK)
+                setPadding(0, 0, 0, 0)
+                gravity = android.view.Gravity.CENTER
+                isAllCaps = false
                 setOnClickListener {
                     substituteTrack(index, track)
                 }
             })
             
-            containerLayout.addView(buttonLayout)
             tracksContainer.addView(containerLayout)
         }
     }
@@ -674,6 +888,16 @@ class PlaybackFragment : Fragment() {
         super.onDestroy()
         stopWorkoutTimer()
         volumeTransitionManager?.release()
+        
+        // Ensure WakeLock is released
+        try {
+            if (wakeLock?.isHeld == true) {
+                wakeLock?.release()
+                Log.d(TAG, "🔋 WakeLock released in onDestroy")
+            }
+        } catch (e: Exception) {
+            Log.e(TAG, "Error releasing WakeLock in onDestroy", e)
+        }
     }
 }
 

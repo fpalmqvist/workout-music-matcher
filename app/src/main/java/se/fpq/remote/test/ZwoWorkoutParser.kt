@@ -54,19 +54,40 @@ object ZwoWorkoutParser {
 
         while (parser.next() != XmlPullParser.END_TAG) {
             if (parser.eventType == XmlPullParser.START_TAG) {
-                val block = when (parser.name) {
-                    "Warmup" -> parseWarmup(parser)
-                    "SteadyState" -> parseSteadyState(parser)
-                    "Cooldown" -> parseCooldown(parser)
+                when (parser.name) {
+                    "Warmup" -> {
+                        val block = parseWarmup(parser)
+                        blocks.add(block)
+                        totalDuration += block.duration
+                    }
+                    "SteadyState" -> {
+                        val block = parseSteadyState(parser)
+                        blocks.add(block)
+                        totalDuration += block.duration
+                    }
+                    "Cooldown" -> {
+                        val block = parseCooldown(parser)
+                        blocks.add(block)
+                        totalDuration += block.duration
+                    }
+                    "IntervalsT" -> {
+                        val expandedBlocks = parseIntervalsT(parser)
+                        blocks.addAll(expandedBlocks)
+                        totalDuration += expandedBlocks.sumOf { it.duration }
+                    }
+                    "Ramp" -> {
+                        val block = parseRamp(parser)
+                        blocks.add(block)
+                        totalDuration += block.duration
+                    }
+                    "Freeride" -> {
+                        val block = parseFreeride(parser)
+                        blocks.add(block)
+                        totalDuration += block.duration
+                    }
                     else -> {
                         skipTag(parser)
-                        null
                     }
-                }
-
-                if (block != null) {
-                    blocks.add(block)
-                    totalDuration += block.duration
                 }
             }
         }
@@ -129,6 +150,68 @@ object ZwoWorkoutParser {
         )
     }
 
+    private fun parseIntervalsT(parser: XmlPullParser): List<WorkoutBlock> {
+        val repeat = parser.getAttributeValue(null, "Repeat")?.toIntOrNull() ?: 1
+        val onDuration = parser.getAttributeValue(null, "OnDuration")?.toIntOrNull() ?: 0
+        val offDuration = parser.getAttributeValue(null, "OffDuration")?.toIntOrNull() ?: 0
+        val onPower = parser.getAttributeValue(null, "OnPower")?.toDoubleOrNull() ?: 0.0
+        val offPower = parser.getAttributeValue(null, "OffPower")?.toDoubleOrNull() ?: 0.0
+        val onCadence = parser.getAttributeValue(null, "OnCadence")?.toIntOrNull()
+        val offCadence = parser.getAttributeValue(null, "OffCadence")?.toIntOrNull()
+
+        skipTag(parser)
+
+        // Expand IntervalsT into individual ON/OFF blocks
+        val expandedBlocks = mutableListOf<WorkoutBlock>()
+        repeat(repeat) {
+            expandedBlocks.add(
+                WorkoutBlock.Interval(
+                    duration = onDuration,
+                    power = onPower,
+                    cadence = onCadence,
+                    isActive = true
+                )
+            )
+            expandedBlocks.add(
+                WorkoutBlock.Interval(
+                    duration = offDuration,
+                    power = offPower,
+                    cadence = offCadence,
+                    isActive = false
+                )
+            )
+        }
+        return expandedBlocks
+    }
+
+    private fun parseRamp(parser: XmlPullParser): WorkoutBlock.Ramp {
+        val duration = parser.getAttributeValue(null, "Duration")?.toIntOrNull() ?: 0
+        val powerLow = parser.getAttributeValue(null, "PowerLow")?.toDoubleOrNull() ?: 0.0
+        val powerHigh = parser.getAttributeValue(null, "PowerHigh")?.toDoubleOrNull() ?: 0.0
+        val cadence = parser.getAttributeValue(null, "Cadence")?.toIntOrNull()
+
+        skipTag(parser)
+
+        return WorkoutBlock.Ramp(
+            duration = duration,
+            powerLow = powerLow,
+            powerHigh = powerHigh,
+            cadence = cadence
+        )
+    }
+
+    private fun parseFreeride(parser: XmlPullParser): WorkoutBlock.Freeride {
+        val duration = parser.getAttributeValue(null, "Duration")?.toIntOrNull() ?: 0
+        val cadence = parser.getAttributeValue(null, "Cadence")?.toIntOrNull()
+
+        skipTag(parser)
+
+        return WorkoutBlock.Freeride(
+            duration = duration,
+            cadence = cadence
+        )
+    }
+
     private fun readText(parser: XmlPullParser): String {
         var result = ""
         if (parser.next() == XmlPullParser.TEXT) {
@@ -175,6 +258,25 @@ sealed class WorkoutBlock {
         override val duration: Int,
         val powerLow: Double,
         val powerHigh: Double,
+        override val cadence: Int? = null
+    ) : WorkoutBlock()
+
+    data class Interval(
+        override val duration: Int,
+        val power: Double,
+        override val cadence: Int? = null,
+        val isActive: Boolean = true  // true for ON interval, false for OFF interval
+    ) : WorkoutBlock()
+
+    data class Ramp(
+        override val duration: Int,
+        val powerLow: Double,
+        val powerHigh: Double,
+        override val cadence: Int? = null
+    ) : WorkoutBlock()
+
+    data class Freeride(
+        override val duration: Int,
         override val cadence: Int? = null
     ) : WorkoutBlock()
 }

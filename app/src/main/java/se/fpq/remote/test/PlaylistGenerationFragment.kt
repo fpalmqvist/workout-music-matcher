@@ -9,6 +9,8 @@ import android.widget.Button
 import android.widget.LinearLayout
 import android.widget.ScrollView
 import android.widget.TextView
+import android.graphics.drawable.GradientDrawable
+import android.graphics.Color
 import androidx.fragment.app.Fragment
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -127,15 +129,49 @@ class PlaylistGenerationFragment : Fragment() {
         }
     }
 
+    /**
+     * Maps power percentage to Zwift zone color
+     * Based on https://zwiftinsider.com/power-zone-colors/
+     */
+    private fun getPowerZoneColor(powerPercent: Int): Int {
+        return when {
+            powerPercent < 60 -> Color.parseColor("#808080")    // Grey - Recovery
+            powerPercent < 76 -> Color.parseColor("#0066CC")    // Blue - Endurance
+            powerPercent < 90 -> Color.parseColor("#00BB00")    // Green - Tempo
+            powerPercent < 105 -> Color.parseColor("#FFFF00")   // Yellow - Threshold
+            powerPercent < 119 -> Color.parseColor("#FF9900")   // Orange - VO2 Max
+            else -> Color.parseColor("#FF0000")                 // Red - Anaerobic
+        }
+    }
+
+    /**
+     * Creates a gradient drawable for power ranges (Warmup, Cooldown, Ramp)
+     */
+    private fun createGradientDrawable(powerLowPercent: Int, powerHighPercent: Int): GradientDrawable {
+        val colorLow = getPowerZoneColor(powerLowPercent)
+        val colorHigh = getPowerZoneColor(powerHighPercent)
+        
+        return GradientDrawable().apply {
+            colors = intArrayOf(colorLow, colorHigh)
+            orientation = GradientDrawable.Orientation.LEFT_RIGHT
+            cornerRadius = 8f
+        }
+    }
+
     private fun displayWorkoutBlocks(workout: Workout) {
         blocksContainer.removeAllViews()
         
         workout.blocks.forEach { block ->
             val blockDisplay = when (block) {
-                is WorkoutBlock.Warmup -> "${block.duration}s Warmup @ ${block.cadence} rpm"
-                is WorkoutBlock.SteadyState -> "${block.duration}s Steady @ ${block.cadence} rpm"
-                is WorkoutBlock.Cooldown -> "${block.duration}s Cooldown @ ${block.cadence} rpm"
-                else -> "Unknown block"
+                is WorkoutBlock.Warmup -> "${block.duration}s Warmup @ ${block.cadence} rpm (${(block.powerLow * 100).toInt()}-${(block.powerHigh * 100).toInt()}%)"
+                is WorkoutBlock.SteadyState -> "${block.duration}s Steady @ ${block.cadence} rpm (${(block.power * 100).toInt()}%)"
+                is WorkoutBlock.Cooldown -> "${block.duration}s Cooldown @ ${block.cadence} rpm (${(block.powerLow * 100).toInt()}-${(block.powerHigh * 100).toInt()}%)"
+                is WorkoutBlock.Interval -> {
+                    val type = if (block.isActive) "Interval ON" else "Interval OFF"
+                    "${block.duration}s $type @ ${block.cadence} rpm (${(block.power * 100).toInt()}%)"
+                }
+                is WorkoutBlock.Ramp -> "${block.duration}s Ramp @ ${block.cadence} rpm (${(block.powerLow * 100).toInt()}-${(block.powerHigh * 100).toInt()}%)"
+                is WorkoutBlock.Freeride -> "${block.duration}s Freeride @ ${block.cadence} rpm"
             }
             
             val blockView = TextView(requireContext()).apply {
@@ -149,7 +185,38 @@ class PlaylistGenerationFragment : Fragment() {
                     marginStart = 12
                     marginEnd = 12
                 }
-                setBackgroundColor(android.graphics.Color.parseColor("#E8E8E8"))
+                
+                // Apply Zwift power zone colors
+                background = when (block) {
+                    is WorkoutBlock.Warmup -> {
+                        val lowPercent = (block.powerLow * 100).toInt()
+                        val highPercent = (block.powerHigh * 100).toInt()
+                        createGradientDrawable(lowPercent, highPercent)
+                    }
+                    is WorkoutBlock.SteadyState -> {
+                        val powerPercent = (block.power * 100).toInt()
+                        android.graphics.drawable.ColorDrawable(getPowerZoneColor(powerPercent))
+                    }
+                    is WorkoutBlock.Cooldown -> {
+                        val lowPercent = (block.powerLow * 100).toInt()
+                        val highPercent = (block.powerHigh * 100).toInt()
+                        createGradientDrawable(lowPercent, highPercent)
+                    }
+                    is WorkoutBlock.Interval -> {
+                        val powerPercent = (block.power * 100).toInt()
+                        android.graphics.drawable.ColorDrawable(getPowerZoneColor(powerPercent))
+                    }
+                    is WorkoutBlock.Ramp -> {
+                        val lowPercent = (block.powerLow * 100).toInt()
+                        val highPercent = (block.powerHigh * 100).toInt()
+                        createGradientDrawable(lowPercent, highPercent)
+                    }
+                    is WorkoutBlock.Freeride -> {
+                        android.graphics.drawable.ColorDrawable(Color.parseColor("#E8E8E8"))
+                    }
+                }
+                
+                setTextColor(Color.BLACK)
                 setPadding(12, 12, 12, 12)
             }
             blocksContainer.addView(blockView)
