@@ -312,6 +312,27 @@ class PlaybackFragment : Fragment() {
         return 50  // Default if no matching block found
     }
 
+    private fun getCadenceForTrack(track: WorkoutTrack): Int? {
+        val activity = requireActivity() as MainActivity
+        val workout = activity.currentWorkout ?: return null
+        
+        // Find which block this track belongs to by matching its start time
+        // Calculate cumulative time through blocks
+        var cumulativeTimeMs = 0
+        for (block in workout.blocks) {
+            val blockStartMs = cumulativeTimeMs
+            val blockEndMs = cumulativeTimeMs + block.duration * 1000
+            
+            // Check if this track's start time falls within this block
+            if (track.startTimeMs >= blockStartMs && track.startTimeMs < blockEndMs) {
+                return block.cadence
+            }
+            
+            cumulativeTimeMs = blockEndMs
+        }
+        return null  // Default if no matching block found
+    }
+
     private fun displayTracks(tracks: List<WorkoutTrack>) {
         tracksContainer.removeAllViews()
         trackInfo.text = "Tracks: 1/${tracks.size}"
@@ -427,10 +448,25 @@ class PlaybackFragment : Fragment() {
                 setTextColor(textColor)
             })
             
-            // BPM (on bottom, only if available, right-aligned)
+            // BPM (on middle, only if available, right-aligned)
             if (track.bpm != null && track.bpm > 0) {
                 metaLayout.addView(TextView(requireContext()).apply {
                     text = "${track.bpm} BPM"
+                    textSize = 11f
+                    layoutParams = LinearLayout.LayoutParams(
+                        ViewGroup.LayoutParams.MATCH_PARENT,
+                        ViewGroup.LayoutParams.WRAP_CONTENT
+                    )
+                    textAlignment = android.view.View.TEXT_ALIGNMENT_TEXT_END
+                    setTextColor(textColor)
+                })
+            }
+            
+            // Target RPM (on bottom, only if available, right-aligned)
+            val targetCadence = getCadenceForTrack(track)
+            if (targetCadence != null && targetCadence > 0) {
+                metaLayout.addView(TextView(requireContext()).apply {
+                    text = "${targetCadence} RPM"
                     textSize = 11f
                     layoutParams = LinearLayout.LayoutParams(
                         ViewGroup.LayoutParams.MATCH_PARENT,

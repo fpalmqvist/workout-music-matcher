@@ -1,13 +1,20 @@
 package se.fpq.remote.test
 
 import android.util.Log
+import kotlin.random.Random
 
 private const val TAG = "PlaylistGenerationEngine"
 
 /**
  * Generates a playlist by matching songs to workout blocks based on BPM/cadence
+ * Includes randomization to avoid repetitive track selection
  */
 class PlaylistGenerationEngine {
+    
+    // Threshold: tracks within this score of the best match are considered "good enough"
+    // For example, 5 means "within 5 points of best score"
+    // This handles multiples (65 BPM and 130 BPM treated equally for 65 RPM cadence)
+    private val goodEnoughThresholdScore = 5
     
     private fun log(message: String) {
         Log.d(TAG, message)
@@ -58,7 +65,8 @@ class PlaylistGenerationEngine {
                 trackFeatures,
                 workoutElapsedTime,
                 usedTrackIds,
-                globalTrackIndexOffset
+                globalTrackIndexOffset,
+                targetCadence
             )
             
             playlistTracks.addAll(blockTracks)
@@ -92,7 +100,8 @@ class PlaylistGenerationEngine {
         trackFeatures: Map<String, SpotifyAudioFeatures>,
         workoutElapsedTime: Int,
         usedTrackIds: MutableSet<String>,
-        globalTrackIndexOffset: Int
+        globalTrackIndexOffset: Int,
+        targetCadence: Int?
     ): Pair<List<PlaylistTrackSelection>, Int> {
         val selectedTracks = mutableListOf<PlaylistTrackSelection>()
         var remainingDuration = blockDuration
@@ -110,17 +119,26 @@ class PlaylistGenerationEngine {
             tracksToUse = availableTracks
         }
         
-        // For initial selection, pick sequentially from the best matches
-        // This ensures we get the best-matching tracks for this block's cadence
+        // For initial selection, pick from "good enough" tracks with randomization
+        // This avoids always picking the same best track
         var trackIndex = 0
         var tracksAdded = 0
+        var usedIndexes = mutableSetOf<Int>()
         
         while (remainingDuration > 0 && trackIndex < tracksToUse.size) {
-            val track = tracksToUse[trackIndex]
+            // Select a random "good enough" track from remaining tracks
+            val selectedIndex = selectGoodEnoughTrackIndex(tracksToUse, usedIndexes, trackFeatures, targetCadence)
+            
+            if (selectedIndex == -1) {
+                log("   ⚠️ No more good tracks available")
+                break
+            }
+            
+            val track = tracksToUse[selectedIndex]
             val trackDurationMs = track.durationMs
             val trackDurationSec = trackDurationMs / 1000
             
-            log("   Trying track[${trackIndex % tracksToUse.size}]: '${track.name}' (${trackDurationSec}s, need ${remainingDuration}s)")
+            log("   Trying track[${selectedIndex}]: '${track.name}' (${trackDurationSec}s, need ${remainingDuration}s)")
             
             if (trackDurationSec <= remainingDuration) {
                 // Get top 3 alternative tracks
@@ -140,6 +158,7 @@ class PlaylistGenerationEngine {
                 blockStartTime += trackDurationSec
                 remainingDuration -= trackDurationSec
                 tracksAdded++
+                usedIndexes.add(selectedIndex)
             } else if (remainingDuration >= 30) {
                 // Get top 3 alternative tracks
                 val alternatives = getAlternativeTracks(track, tracksToUse, 3)
@@ -158,6 +177,10 @@ class PlaylistGenerationEngine {
                 blockStartTime += remainingDuration
                 remainingDuration = 0
                 tracksAdded++
+                usedIndexes.add(selectedIndex)
+            } else {
+                // Track too long and can't fit, mark as used and try next
+                usedIndexes.add(selectedIndex)
             }
             
             trackIndex++
@@ -166,6 +189,82 @@ class PlaylistGenerationEngine {
         log("   📊 Selected ${tracksAdded} tracks for block")
         
         return Pair(selectedTracks, trackIndex)
+    }
+    
+    /**
+     * Select a random track that is "good enough" (within score threshold of best match)
+     * Returns -1 if no good tracks remain
+     */
+    private fun selectGoodEnoughTrackIndex(
+        sortedTracks: List<SpotifyTrack>,
+        usedIndexes: Set<Int>,
+        trackFeatures: Map<String, SpotifyAudioFeatures>,
+        targetCadence: Int?
+    ): Int {
+        // If no valid target cadence, just do random selection
+        if (targetCadence == null || targetCadence < 0) {
+            log("     🎲 No target cadence - selecting random from all available")
+            val availableTracks = sortedTracks.indices.filter { it !in usedIndexes }
+            
+            if (availableTracks.isEmpty()) {
+                return -1
+            }
+            
+            val randomIndex = availableTracks.random()
+            log("     Selected ${sortedTracks[randomIndex].name} randomly from ${availableTracks.size} available options")
+            
+            return randomIndex
+        }
+        
+        // Get the best track's score (first in sorted list, already sorted by score)
+        val bestTrack = sortedTracks.firstOrNull { it.id !in usedIndexes.map { idx -> sortedTracks[idx].id } } 
+            ?: run {
+                // If all unused tracks are gone, pick from any available
+                val availableTracks = sortedTracks.indices.filter { it !in usedIndexes }
+                if (availableTracks.isEmpty()) return -1
+                return availableTracks.random()
+            }
+        
+        val bestScore = calculateBpmScore(bestTrack, targetCadence, trackFeatures)
+        val scoreThreshold = bestScore + goodEnoughThresholdScore
+        
+        log("     🎲 Score threshold: ${bestScore} (within ±${goodEnoughThresholdScore} points, includes multiples)")
+        
+        // Get all unused tracks that are "good enough" by score (accounts for multiples like 65 BPM and 130 BPM)
+        val goodEnoughTracks = sortedTracks.mapIndexed { index, track ->
+            if (index !in usedIndexes) {
+                val score = calculateBpmScore(track, targetCadence, trackFeatures)
+                if (score <= scoreThreshold) {
+                    index to track
+                } else {
+                    null
+                }
+            } else {
+                null
+            }
+        }.filterNotNull()
+        
+        if (goodEnoughTracks.isEmpty()) {
+            log("     ⚠️ No good enough tracks found, selecting random from all available")
+            
+            // Get all unused tracks and randomly select one
+            val availableTracks = sortedTracks.indices.filter { it !in usedIndexes }
+            
+            if (availableTracks.isEmpty()) {
+                return -1
+            }
+            
+            val randomIndex = availableTracks.random()
+            log("     Selected ${sortedTracks[randomIndex].name} randomly from ${availableTracks.size} available options")
+            
+            return randomIndex
+        }
+        
+        // Randomly select from good enough tracks
+        val randomTrack = goodEnoughTracks.random()
+        log("     Selected ${randomTrack.second.name} from ${goodEnoughTracks.size} good enough options")
+        
+        return randomTrack.first
     }
     
     /**
