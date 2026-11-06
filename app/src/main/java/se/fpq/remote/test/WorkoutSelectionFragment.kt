@@ -22,6 +22,7 @@ class WorkoutSelectionFragment : Fragment() {
     }
 
     private lateinit var savedWorkoutsContainer: LinearLayout
+    private lateinit var savedWorkoutsScrollView: ScrollView
     
     private val filePicker = registerForActivityResult(ActivityResultContracts.GetContent()) { uri ->
         if (uri != null) {
@@ -87,7 +88,7 @@ class WorkoutSelectionFragment : Fragment() {
             })
 
             // ScrollView for saved workouts
-            val scrollView = ScrollView(requireContext()).apply {
+            savedWorkoutsScrollView = ScrollView(requireContext()).apply {
                 layoutParams = LinearLayout.LayoutParams(
                     ViewGroup.LayoutParams.MATCH_PARENT,
                     0,
@@ -106,7 +107,7 @@ class WorkoutSelectionFragment : Fragment() {
                 }
                 addView(savedWorkoutsContainer)
             }
-            addView(scrollView)
+            addView(savedWorkoutsScrollView)
 
             // Import button
             addView(Button(requireContext()).apply {
@@ -126,6 +127,26 @@ class WorkoutSelectionFragment : Fragment() {
     override fun onViewCreated(view: View, savedInstanceState: Bundle?) {
         super.onViewCreated(view, savedInstanceState)
         loadSavedWorkouts()
+        
+        // Restore scroll position if available
+        savedInstanceState?.let { bundle ->
+            val scrollY = bundle.getInt("savedWorkoutsScrollY", 0)
+            if (scrollY > 0) {
+                savedWorkoutsScrollView.post {
+                    savedWorkoutsScrollView.scrollTo(0, scrollY)
+                }
+            }
+        }
+    }
+    
+    override fun onSaveInstanceState(outState: Bundle) {
+        super.onSaveInstanceState(outState)
+        
+        // Save scroll position if view is initialized
+        if (::savedWorkoutsScrollView.isInitialized) {
+            outState.putInt("savedWorkoutsScrollY", savedWorkoutsScrollView.scrollY)
+            Log.d(TAG, "💾 Saved state: savedWorkoutsScrollY=${savedWorkoutsScrollView.scrollY}")
+        }
     }
 
     private fun loadSavedWorkouts() {

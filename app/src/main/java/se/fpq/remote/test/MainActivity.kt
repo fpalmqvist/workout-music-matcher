@@ -7,6 +7,9 @@ import androidx.fragment.app.FragmentActivity
 import com.spotify.android.appremote.api.SpotifyAppRemote
 import com.spotify.android.appremote.api.ConnectionParams
 import com.spotify.android.appremote.api.Connector
+import java.io.File
+import org.json.JSONArray
+import org.json.JSONObject
 
 class MainActivity : FragmentActivity() {
     companion object {
@@ -24,7 +27,14 @@ class MainActivity : FragmentActivity() {
     private var cachedApiService: SpotifyApiService? = null
     
     var currentWorkout: Workout? = null
-    var currentPlaylist: List<WorkoutTrack> = emptyList()
+    private var _currentPlaylist: List<WorkoutTrack> = emptyList()
+    var currentPlaylist: List<WorkoutTrack>
+        get() = _currentPlaylist
+        set(value) {
+            _currentPlaylist = value
+            // Auto-save playlist to SharedPreferences
+            savePlaylistToPrefs(value)
+        }
     var currentGeneratedPlaylist: GeneratedPlaylist? = null
     var shouldResumePlayback = false  // Flag to resume playback after reconnection
     var onConnectionRestored: (() -> Unit)? = null  // Callback to resync playback after reconnection
@@ -80,6 +90,33 @@ class MainActivity : FragmentActivity() {
 
         authManager = AuthManager(this)
         
+        // Restore state if available
+        if (savedInstanceState != null) {
+            val bundle = savedInstanceState
+            isWorkoutPlaying = bundle.getBoolean("isWorkoutPlaying", false)
+            shouldResumePlayback = bundle.getBoolean("shouldResumePlayback", false)
+            wasDisconnectedBeforeResume = bundle.getBoolean("wasDisconnectedBeforeResume", false)
+            
+            // Restore workout from saved workout files if available
+            val savedWorkoutName = bundle.getString("currentWorkoutName")
+            if (savedWorkoutName != null && currentWorkout == null) {
+                restoreWorkoutFromFile(savedWorkoutName)
+            }
+            
+            // Restore playlist from SharedPreferences
+            restorePlaylistFromPrefs()
+            
+            Log.d(TAG, "🔄 Restored MainActivity state: isWorkoutPlaying=$isWorkoutPlaying, workoutName=$savedWorkoutName, playlistSize=${currentPlaylist.size}")
+        } else {
+            // No saved instance state, but check SharedPreferences for workout name
+            // (in case of process death and recreation)
+            val savedWorkoutName = sharedPref.getString("current_workout_name", null)
+            if (savedWorkoutName != null && currentWorkout == null) {
+                Log.d(TAG, "🔄 Restoring workout from SharedPreferences: $savedWorkoutName")
+                restoreWorkoutFromFile(savedWorkoutName)
+            }
+        }
+        
         // Connect to Spotify App Remote on startup
         connectToSpotifyAppRemote()
         
@@ -87,8 +124,145 @@ class MainActivity : FragmentActivity() {
         authenticateWithWebApi()
         
         // Show first fragment if this is first load
+        // Note: Fragment back stack should preserve fragments automatically
         if (savedInstanceState == null) {
             showWorkoutSelectionFragment()
+        }
+    }
+    
+    override fun onSaveInstanceState(outState: Bundle) {
+        super.onSaveInstanceState(outState)
+        
+        outState.putBoolean("isWorkoutPlaying", isWorkoutPlaying)
+        outState.putBoolean("shouldResumePlayback", shouldResumePlayback)
+        outState.putBoolean("wasDisconnectedBeforeResume", wasDisconnectedBeforeResume)
+        
+        // Save workout name/id for reference (fragments can reload if needed)
+        currentWorkout?.let { workout ->
+            outState.putString("currentWorkoutId", workout.id)
+            outState.putString("currentWorkoutName", workout.name)
+            // Also save to SharedPreferences for persistence across process death
+            sharedPref.edit().putString("current_workout_name", workout.name).apply()
+            Log.d(TAG, "💾 Saved workout name to prefs: ${workout.name}")
+        }
+        
+        Log.d(TAG, "💾 Saved MainActivity state: isWorkoutPlaying=$isWorkoutPlaying, workoutId=${currentWorkout?.id}")
+    }
+    
+    /**
+     * Restore workout from saved .zwo file in cache directory
+     * Searches all workout files and matches by the workout name inside the XML
+     */
+    private fun restoreWorkoutFromFile(workoutName: String) {
+        try {
+            val workoutFiles = cacheDir.listFiles { file ->
+                file.name.endsWith(".zwo")
+            } ?: emptyArray()
+            
+            Log.d(TAG, "🔍 Searching for workout: '$workoutName' in ${workoutFiles.size} files")
+            
+            // Try to find by filename first (for backwards compatibility)
+            var workoutFile = workoutFiles.find { file ->
+                file.nameWithoutExtension == workoutName
+            }
+            
+            // If not found by filename, parse all files and match by workout name inside XML
+            if (workoutFile == null) {
+                Log.d(TAG, "   File not found by filename, searching by workout name in XML...")
+                for (file in workoutFiles) {
+                    try {
+                        val result = ZwoWorkoutParser.parse(file.inputStream())
+                        result.onSuccess { workout ->
+                            if (workout.name == workoutName) {
+                                workoutFile = file
+                                Log.d(TAG, "   ✅ Found matching workout in file: ${file.name}")
+                            }
+                        }
+                    } catch (e: Exception) {
+                        Log.w(TAG, "   ⚠️ Error parsing ${file.name}: ${e.message}")
+                    }
+                }
+            }
+            
+            // Use a local copy to avoid smart cast issues
+            val fileToUse = workoutFile
+            if (fileToUse != null) {
+                val result = ZwoWorkoutParser.parse(fileToUse.inputStream())
+                result.onSuccess { workout ->
+                    currentWorkout = workout
+                    Log.d(TAG, "✅ Restored workout from file: ${fileToUse.name} (name: ${workout.name})")
+                }.onFailure { error ->
+                    Log.e(TAG, "❌ Failed to restore workout: ${error.message}")
+                }
+            } else {
+                Log.w(TAG, "⚠️ Workout file not found for workout name: '$workoutName'")
+                Log.d(TAG, "   Available files: ${workoutFiles.map { it.name }.joinToString(", ")}")
+            }
+        } catch (e: Exception) {
+            Log.e(TAG, "❌ Error restoring workout: ${e.message}", e)
+        }
+    }
+    
+    /**
+     * Save playlist to SharedPreferences as JSON
+     */
+    private fun savePlaylistToPrefs(playlist: List<WorkoutTrack>) {
+        try {
+            val jsonArray = JSONArray()
+            playlist.forEach { track ->
+                val jsonObject = JSONObject().apply {
+                    put("trackUri", track.trackUri)
+                    put("startTimeMs", track.startTimeMs)
+                    put("endTimeMs", track.endTimeMs)
+                    put("blockName", track.blockName)
+                    track.targetCadence?.let { put("targetCadence", it) }
+                    track.bpm?.let { put("bpm", it) }
+                }
+                jsonArray.put(jsonObject)
+            }
+            sharedPref.edit().putString("current_playlist", jsonArray.toString()).apply()
+            Log.d(TAG, "💾 Saved playlist to prefs: ${playlist.size} tracks")
+        } catch (e: Exception) {
+            Log.e(TAG, "❌ Error saving playlist: ${e.message}", e)
+        }
+    }
+    
+    /**
+     * Restore playlist from SharedPreferences
+     */
+    private fun restorePlaylistFromPrefs() {
+        try {
+            val playlistJson = sharedPref.getString("current_playlist", null)
+            if (playlistJson != null && playlistJson.isNotEmpty()) {
+                val jsonArray = JSONArray(playlistJson)
+                val restoredPlaylist = mutableListOf<WorkoutTrack>()
+                
+                for (i in 0 until jsonArray.length()) {
+                    val jsonObject = jsonArray.getJSONObject(i)
+                    val track = WorkoutTrack(
+                        jsonObject.getString("trackUri"),
+                        jsonObject.getInt("startTimeMs"),
+                        jsonObject.getInt("endTimeMs"),
+                        jsonObject.getString("blockName"),
+                        if (jsonObject.has("targetCadence") && !jsonObject.isNull("targetCadence")) {
+                            jsonObject.getInt("targetCadence")
+                        } else null,
+                        if (jsonObject.has("bpm") && !jsonObject.isNull("bpm")) {
+                            jsonObject.getInt("bpm")
+                        } else null
+                    )
+                    restoredPlaylist.add(track)
+                }
+                
+                // Only restore if we don't already have a playlist (to avoid overwriting)
+                if (_currentPlaylist.isEmpty() && restoredPlaylist.isNotEmpty()) {
+                    // Set directly to backing field to avoid triggering save
+                    _currentPlaylist = restoredPlaylist
+                    Log.d(TAG, "✅ Restored playlist from prefs: ${restoredPlaylist.size} tracks")
+                }
+            }
+        } catch (e: Exception) {
+            Log.e(TAG, "❌ Error restoring playlist: ${e.message}", e)
         }
     }
 
@@ -225,6 +399,15 @@ class MainActivity : FragmentActivity() {
     }
 
     fun showWorkoutSelectionFragment() {
+        // Clear playlist and workout when starting new workout selection
+        _currentPlaylist = emptyList()
+        sharedPref.edit()
+            .remove("current_playlist")
+            .remove("current_workout_name")
+            .apply()
+        currentGeneratedPlaylist = null
+        currentWorkout = null
+        
         val fragment = WorkoutSelectionFragment()
         supportFragmentManager.beginTransaction()
             .replace(R.id.fragment_container, fragment)

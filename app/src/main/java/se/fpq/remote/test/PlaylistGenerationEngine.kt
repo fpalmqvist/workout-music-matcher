@@ -3,7 +3,7 @@ package se.fpq.remote.test
 import android.util.Log
 import kotlin.random.Random
 
-private const val TAG = "PlaylistGenerationEngine"
+private const val TAG = "PlaylistGenerationEng"
 
 /**
  * Generates a playlist by matching songs to workout blocks based on BPM/cadence

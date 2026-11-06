@@ -23,6 +23,7 @@ class PlaylistGenerationFragment : Fragment() {
 
     private lateinit var blocksContainer: LinearLayout
     private lateinit var generateButton: Button
+    private lateinit var blocksScrollView: ScrollView
 
     override fun onCreateView(
         inflater: LayoutInflater,
@@ -95,7 +96,7 @@ class PlaylistGenerationFragment : Fragment() {
             })
 
             // ScrollView for blocks
-            val scrollView = ScrollView(requireContext()).apply {
+            blocksScrollView = ScrollView(requireContext()).apply {
                 layoutParams = LinearLayout.LayoutParams(
                     ViewGroup.LayoutParams.MATCH_PARENT,
                     0,
@@ -114,7 +115,7 @@ class PlaylistGenerationFragment : Fragment() {
                 }
                 addView(blocksContainer)
             }
-            addView(scrollView)
+            addView(blocksScrollView)
         }
     }
 
@@ -126,6 +127,26 @@ class PlaylistGenerationFragment : Fragment() {
         
         if (workout != null) {
             displayWorkoutBlocks(workout)
+        }
+        
+        // Restore scroll position if available
+        savedInstanceState?.let { bundle ->
+            val scrollY = bundle.getInt("blocksScrollY", 0)
+            if (scrollY > 0) {
+                blocksScrollView.post {
+                    blocksScrollView.scrollTo(0, scrollY)
+                }
+            }
+        }
+    }
+    
+    override fun onSaveInstanceState(outState: Bundle) {
+        super.onSaveInstanceState(outState)
+        
+        // Save scroll position if view is initialized
+        if (::blocksScrollView.isInitialized) {
+            outState.putInt("blocksScrollY", blocksScrollView.scrollY)
+            Log.d(TAG, "💾 Saved state: blocksScrollY=${blocksScrollView.scrollY}")
         }
     }
 
@@ -280,24 +301,38 @@ class PlaylistGenerationFragment : Fragment() {
                 }
                 
                 val savedTracks = tracksTofetch
-                Log.d(TAG, "✅ Found ${savedTracks.size} tracks")
+                Log.d(TAG, "✅ Found ${savedTracks.size} tracks from API")
                 
-                if (savedTracks.isEmpty()) {
-                    Log.w(TAG, "⚠️ No saved tracks found, using demo tracks instead")
+                // Filter out any tracks that might have slipped through (safety net)
+                // This ensures we only use playable tracks for workout generation
+                val playableTracks = savedTracks.filter { track ->
+                    // Basic validation - track should have valid ID and URI
+                    track.id.isNotEmpty() && track.uri.isNotEmpty() && track.uri.startsWith("spotify:track:")
+                }
+                
+                val filteredCount = savedTracks.size - playableTracks.size
+                if (filteredCount > 0) {
+                    Log.w(TAG, "⚠️ Filtered out $filteredCount invalid/unplayable tracks")
+                }
+                
+                Log.d(TAG, "✅ Using ${playableTracks.size} playable tracks for playlist generation")
+                
+                if (playableTracks.isEmpty()) {
+                    Log.w(TAG, "⚠️ No playable tracks found, using demo tracks instead")
                     useDemoPlaylist(activity, workout)
                     return@launch
                 }
                 
-                Log.d(TAG, "🔍 Fetching audio features for ${savedTracks.size} tracks...")
+                Log.d(TAG, "🔍 Fetching audio features for ${playableTracks.size} tracks...")
                 // Extract track IDs from URIs (format: spotify:track:ID)
-                val trackIds = savedTracks.map { track ->
+                val trackIds = playableTracks.map { track ->
                     track.uri.substringAfterLast(":")
                 }
                 Log.d(TAG, "  Sample IDs: ${trackIds.take(3).joinToString(", ")}")
                 
                 // Try to fetch audio features with track info, but don't fail if it doesn't work
                 val audioFeatures = try {
-                    val result = apiService.getAudioFeatures(trackIds, savedTracks)
+                    val result = apiService.getAudioFeatures(trackIds, playableTracks)
                     (result.getOrNull() ?: emptyMap<String, SpotifyAudioFeatures>()).also {
                         if (it.isEmpty()) {
                             Log.w(TAG, "⚠️ Audio features API returned no data, using defaults")
@@ -316,7 +351,7 @@ class PlaylistGenerationFragment : Fragment() {
                 
                 try {
                     // Get track IDs for ReccoBeats API
-                    val trackIds = savedTracks.map { track -> track.id }
+                    val trackIds = playableTracks.map { track -> track.id }
                     
                     // Fetch audio features from ReccoBeats (no API key needed!)
                     val reccoFeatures = kotlinx.coroutines.runBlocking {
@@ -332,7 +367,7 @@ class PlaylistGenerationFragment : Fragment() {
                             Log.d(TAG, "  ✅ Enriched: $trackId - ${features.tempo.toInt()} BPM")
                         }
                     }
-                    Log.d(TAG, "✅ BPM enrichment complete: $enrichedCount/${savedTracks.size} tracks enriched (${reccoBeatsService.getCacheStats()})")
+                    Log.d(TAG, "✅ BPM enrichment complete: $enrichedCount/${playableTracks.size} tracks enriched (${reccoBeatsService.getCacheStats()})")
                 } catch (e: Exception) {
                     Log.w(TAG, "⚠️ ReccoBeats enrichment failed: ${e.message}, continuing with defaults")
                 }
@@ -340,7 +375,7 @@ class PlaylistGenerationFragment : Fragment() {
                 Log.d(TAG, "🎵 Generating playlist using PlaylistGenerationEngine...")
                 val engine = PlaylistGenerationEngine()
                 val config = BpmMatchingConfig()
-                val playlistResult = engine.generatePlaylist(workout, savedTracks, audioFeatures, config)
+                val playlistResult = engine.generatePlaylist(workout, playableTracks, audioFeatures, config)
                 val generatedPlaylist = playlistResult.getOrNull()
                 
                 if (generatedPlaylist == null) {

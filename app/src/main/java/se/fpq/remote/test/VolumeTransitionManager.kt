@@ -132,6 +132,25 @@ class VolumeTransitionManager(private val context: Context) {
     }
     
     /**
+     * Restore volume to a specific level
+     * This is useful when resuming playback after rotation, to restore the user's manually adjusted volume
+     */
+    fun restoreToVolume(targetVolume: Int) {
+        cancelFade()
+        val clampedVolume = targetVolume.coerceIn(0, maxVolume)
+        originalVolume = clampedVolume
+        audioManager.setStreamVolume(AudioManager.STREAM_MUSIC, clampedVolume, 0)
+        Log.d(TAG, "   🔊 Volume restored to: $clampedVolume/$maxVolume")
+    }
+    
+    /**
+     * Get the current system volume
+     */
+    fun getCurrentVolume(): Int {
+        return audioManager.getStreamVolume(AudioManager.STREAM_MUSIC)
+    }
+    
+    /**
      * Cleanup resources
      */
     fun release() {

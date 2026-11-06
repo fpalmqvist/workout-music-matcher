@@ -42,7 +42,15 @@ class SpotifyApiService(private val accessToken: String) {
                 val items = response.getJSONArray("items")
                 
                 for (i in 0 until items.length()) {
-                    val trackObj = items.getJSONObject(i).getJSONObject("track")
+                    val itemObj = items.getJSONObject(i)
+                    val trackObj = itemObj.optJSONObject("track")
+                    
+                    // Skip if track is null (shouldn't happen for saved tracks, but be safe)
+                    if (trackObj == null || trackObj.isNull("id")) {
+                        Log.d(TAG, "⚠️ Skipping null/deleted saved track")
+                        continue
+                    }
+                    
                     val track = parseTrack(trackObj)
                     tracks.add(track)
                 }
@@ -158,7 +166,7 @@ class SpotifyApiService(private val accessToken: String) {
             var total = Int.MAX_VALUE
             
             while (offset < total) {
-                val url = "$apiBaseUrl/playlists/$playlistId/tracks?limit=50&offset=$offset"
+                val url = "$apiBaseUrl/playlists/$playlistId/tracks?limit=50&offset=$offset&market=from_token"
                 Log.d(TAG, "📖 Fetching playlist tracks: offset=$offset")
                 
                 val response = makeGetRequest(url)
@@ -169,13 +177,91 @@ class SpotifyApiService(private val accessToken: String) {
                 }
                 
                 val items = response.getJSONArray("items")
+                var skippedCount = 0
                 for (i in 0 until items.length()) {
-                    val trackObj = items.getJSONObject(i).getJSONObject("track")
+                    val itemObj = items.getJSONObject(i)
+                    val trackObj = itemObj.optJSONObject("track")
+                    
                     // Skip if track is null (deleted tracks can appear in playlists)
-                    if (trackObj != null && !trackObj.isNull("id")) {
-                        val track = parseTrack(trackObj)
-                        tracks.add(track)
+                    if (trackObj == null || trackObj.isNull("id")) {
+                        Log.d(TAG, "⚠️ Skipping null/deleted track in playlist")
+                        skippedCount++
+                        continue
                     }
+                    
+                    val trackName = trackObj.optString("name", "Unknown")
+                    val trackId = trackObj.optString("id", "Unknown")
+                    
+                    // Log details for Mercedes Benz specifically to debug
+                    val isMercedesBenz = trackId == "1i2MuFtYQeo05W1pvYhRl6" || trackName.contains("Mercedes Benz", ignoreCase = true)
+                    if (isMercedesBenz) {
+                        Log.d(TAG, "🔍 DEBUG: Found Mercedes Benz track")
+                        Log.d(TAG, "   Item keys: ${itemObj.keys().asSequence().toList()}")
+                        Log.d(TAG, "   Track keys: ${trackObj.keys().asSequence().toList()}")
+                        Log.d(TAG, "   Item JSON: ${itemObj.toString().take(500)}")
+                        Log.d(TAG, "   Track JSON: ${trackObj.toString().take(500)}")
+                    }
+                    
+                    // Check if track is playable
+                    // is_playable can be on the item object or the track object
+                    // Check both - if either explicitly says false, skip the track
+                    val itemHasIsPlayable = itemObj.has("is_playable")
+                    val trackHasIsPlayable = trackObj.has("is_playable")
+                    val itemIsPlayable = if (itemHasIsPlayable) itemObj.getBoolean("is_playable") else true
+                    val trackIsPlayable = if (trackHasIsPlayable) trackObj.getBoolean("is_playable") else true
+                    
+                    if (isMercedesBenz) {
+                        Log.d(TAG, "   item.has('is_playable')=$itemHasIsPlayable, item.is_playable=$itemIsPlayable")
+                        Log.d(TAG, "   track.has('is_playable')=$trackHasIsPlayable, track.is_playable=$trackIsPlayable")
+                    }
+                    
+                    // Track is unplayable if either explicitly says false
+                    val isPlayable = itemIsPlayable && trackIsPlayable
+                    
+                    if (!isPlayable) {
+                        Log.w(TAG, "⚠️ Skipping unplayable track: $trackName (ID: $trackId)")
+                        Log.w(TAG, "   item.has('is_playable')=$itemHasIsPlayable, item.is_playable=$itemIsPlayable")
+                        Log.w(TAG, "   track.has('is_playable')=$trackHasIsPlayable, track.is_playable=$trackIsPlayable")
+                        skippedCount++
+                        continue
+                    }
+                    
+                    // Check for restrictions - this is a reliable indicator
+                    if (trackObj.has("restrictions")) {
+                        val restrictions = trackObj.optJSONObject("restrictions")
+                        val reason = restrictions?.optString("reason", null)
+                        if (reason != null) {
+                            Log.w(TAG, "⚠️ Skipping restricted track: $trackName (ID: $trackId) - reason: $reason")
+                            if (isMercedesBenz) {
+                                Log.d(TAG, "   Restrictions object: ${restrictions.toString()}")
+                            }
+                            skippedCount++
+                            continue
+                        }
+                    }
+                    
+                    // Check if track is_local (local files can't be played via API)
+                    val isLocal = trackObj.optBoolean("is_local", false)
+                    if (isLocal) {
+                        Log.w(TAG, "⚠️ SKIP: $trackName | Reason: Local track")
+                        skippedCount++
+                        continue
+                    }
+                    
+                    // Check if track is an episode (podcasts) - these might not play the same way
+                    val isEpisode = trackObj.optBoolean("episode", false)
+                    if (isEpisode) {
+                        Log.w(TAG, "⚠️ SKIP: $trackName | Reason: Episode (podcast)")
+                        skippedCount++
+                        continue
+                    }
+                    
+                    val track = parseTrack(trackObj)
+                    tracks.add(track)
+                }
+                
+                if (skippedCount > 0) {
+                    Log.d(TAG, "📊 Filtered out $skippedCount unplayable/restricted tracks from playlist")
                 }
                 
                 offset += 50

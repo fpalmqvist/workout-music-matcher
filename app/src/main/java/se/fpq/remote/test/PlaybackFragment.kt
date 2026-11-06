@@ -13,6 +13,7 @@ import android.widget.LinearLayout
 import android.widget.ScrollView
 import android.widget.TextView
 import android.graphics.drawable.GradientDrawable
+import android.media.AudioManager
 import androidx.fragment.app.Fragment
 
 class PlaybackFragment : Fragment() {
@@ -21,10 +22,11 @@ class PlaybackFragment : Fragment() {
     }
 
     private var isPlaying = false
-    private var currentTrackIndex = 0
+    private var currentTrackIndex = -1  // -1 means no track is currently playing
     private var workoutTimerHandler: Handler? = null
     private var workoutTimerRunnable: Runnable? = null
     private lateinit var tracksContainer: LinearLayout
+    private lateinit var tracksScrollView: ScrollView
     private lateinit var playButton: Button
     private lateinit var pauseButton: Button
     private lateinit var trackInfo: TextView
@@ -128,7 +130,7 @@ class PlaybackFragment : Fragment() {
             addView(trackInfo)
 
             // ScrollView for tracks
-            val scrollView = ScrollView(requireContext()).apply {
+            tracksScrollView = ScrollView(requireContext()).apply {
                 layoutParams = LinearLayout.LayoutParams(
                     ViewGroup.LayoutParams.MATCH_PARENT,
                     0,
@@ -145,7 +147,7 @@ class PlaybackFragment : Fragment() {
                 }
                 addView(tracksContainer)
             }
-            addView(scrollView)
+            addView(tracksScrollView)
         }
     }
 
@@ -156,8 +158,27 @@ class PlaybackFragment : Fragment() {
         val generatedPlaylist = activity.currentGeneratedPlaylist
         val tracks = activity.currentPlaylist
         
+        // Restore state from saved instance
+        val savedVolume: Int? = savedInstanceState?.let { bundle ->
+            isPlaying = bundle.getBoolean("isPlaying", false)
+            currentTrackIndex = bundle.getInt("currentTrackIndex", 0)
+            workoutStartTimeMs = bundle.getLong("workoutStartTimeMs", 0L)
+            spotifyCurrentTrackUri = bundle.getString("spotifyCurrentTrackUri")
+            
+            val volume = if (bundle.containsKey("savedVolume")) {
+                bundle.getInt("savedVolume", -1).takeIf { it >= 0 }
+            } else {
+                null
+            }
+            
+            Log.d(TAG, "🔄 Restored state: isPlaying=$isPlaying, currentTrackIndex=$currentTrackIndex, workoutStartTimeMs=$workoutStartTimeMs, savedVolume=$volume")
+            volume
+        }
+        
         if (tracks.isNotEmpty()) {
-            displayTracks(tracks)
+            // Display tracks - will use updateTrackDisplay() which handles workout availability
+            // If workout isn't restored yet, we'll re-display after a short delay
+            updateTrackDisplay()
             
             // Initialize substitution manager with enriched source data
             if (generatedPlaylist != null && generatedPlaylist.sourceAllTracks.isNotEmpty()) {
@@ -170,12 +191,126 @@ class PlaybackFragment : Fragment() {
                 substitutionManager?.setPlaylistTracks(playlistTrackIds)
                 Log.d(TAG, "✅ Substitution manager initialized with ${generatedPlaylist.sourceAllTracks.size} tracks")
             }
+            
+            // If workout wasn't available, check again after a delay to re-display with correct colors
+            if (activity.currentWorkout == null) {
+                view.postDelayed({
+                    val restoredWorkout = (requireActivity() as MainActivity).currentWorkout
+                    if (restoredWorkout != null) {
+                        Log.d(TAG, "🔄 Workout restored, updating track colors")
+                        updateTrackDisplay()
+                    } else {
+                        Log.w(TAG, "⚠️ Workout still not available after delay")
+                    }
+                }, 200)
+            }
         }
         
         workoutTimerHandler = Handler(Looper.getMainLooper())
         
         // Initialize volume transition manager for smooth fades
         volumeTransitionManager = VolumeTransitionManager(requireContext())
+        
+        // Restore volume to saved level if available
+        savedVolume?.let { volume ->
+            volumeTransitionManager?.restoreToVolume(volume)
+            Log.d(TAG, "🔊 Restored volume to saved level: $volume")
+        }
+        
+        // If playback was active, restore it
+        if (isPlaying && workoutStartTimeMs > 0) {
+            Log.d(TAG, "🔄 Restoring playback after rotation")
+            // Update button states
+            playButton.isEnabled = false
+            pauseButton.isEnabled = true
+            pauseButton.text = "⏸ Pause"
+            // Update UI to show correct track
+            updateTrackDisplay()
+            // Resume playback
+            resumePlaybackAfterRotation()
+        } else {
+            // Update button states for non-playing state
+            playButton.isEnabled = true
+            pauseButton.isEnabled = false
+        }
+    }
+    
+    override fun onSaveInstanceState(outState: Bundle) {
+        super.onSaveInstanceState(outState)
+        
+        outState.putBoolean("isPlaying", isPlaying)
+        outState.putInt("currentTrackIndex", currentTrackIndex)
+        outState.putLong("workoutStartTimeMs", workoutStartTimeMs)
+        spotifyCurrentTrackUri?.let {
+            outState.putString("spotifyCurrentTrackUri", it)
+        }
+        
+        // Save current volume level to preserve user's manual adjustments
+        val audioManager = requireContext().getSystemService(android.content.Context.AUDIO_SERVICE) as AudioManager
+        val currentVolume = audioManager.getStreamVolume(AudioManager.STREAM_MUSIC)
+        outState.putInt("savedVolume", currentVolume)
+        
+        Log.d(TAG, "💾 Saved state: isPlaying=$isPlaying, currentTrackIndex=$currentTrackIndex, workoutStartTimeMs=$workoutStartTimeMs, volume=$currentVolume")
+    }
+    
+    /**
+     * Resume playback after screen rotation
+     */
+    private fun resumePlaybackAfterRotation() {
+        val activity = requireActivity() as MainActivity
+        val tracks = activity.currentPlaylist
+        
+        if (tracks.isEmpty()) {
+            Log.w(TAG, "⚠️ Cannot resume - no tracks available")
+            return
+        }
+        
+        // Calculate elapsed time since workout started (using same time source as timer)
+        val currentTimeMs = System.currentTimeMillis()
+        val elapsedTimeMs = currentTimeMs - workoutStartTimeMs
+        
+        Log.d(TAG, "▶️ Resuming playback: elapsed=${elapsedTimeMs}ms, workoutStartTime=${workoutStartTimeMs}, currentTime=${currentTimeMs}")
+        
+        // Find which track should be playing based on elapsed time
+        // Tracks use absolute endTimeMs from workout start
+        var targetTrackIndex = 0
+        for ((index, track) in tracks.withIndex()) {
+            if (elapsedTimeMs < track.endTimeMs) {
+                targetTrackIndex = index
+                break
+            }
+            targetTrackIndex = index + 1
+        }
+        
+        // Make sure we don't go past the last track
+        if (targetTrackIndex >= tracks.size) {
+            targetTrackIndex = tracks.size - 1
+            isPlaying = false
+            Log.d(TAG, "✅ Workout already completed")
+            return
+        }
+        
+        currentTrackIndex = targetTrackIndex
+        updateTrackDisplay()
+        
+        // Resume Spotify playback
+        if (activity.spotifyAppRemote != null && activity.isAppRemoteConnected) {
+            activity.spotifyAppRemote?.playerApi?.resume()
+            Log.d(TAG, "✅ Resumed Spotify playback")
+        } else {
+            Log.w(TAG, "⚠️ Spotify not connected, will resume when connected")
+            // Set callback to resume when connected
+            activity.onConnectionRestored = {
+                activity.spotifyAppRemote?.playerApi?.resume()
+                Log.d(TAG, "✅ Resumed Spotify playback after reconnection")
+            }
+            activity.shouldResumePlayback = true
+        }
+        
+        // Restart workout timer (it will use the saved workoutStartTimeMs)
+        if (isPlaying) {
+            startWorkoutTimer(tracks)
+        }
     }
     
     override fun onResume() {
@@ -264,7 +399,7 @@ class PlaybackFragment : Fragment() {
         return GradientDrawable().apply {
             colors = intArrayOf(colorLow, colorHigh)
             orientation = GradientDrawable.Orientation.LEFT_RIGHT
-            cornerRadius = 0f
+            cornerRadius = dpToPx(8).toFloat()  // Rounded corners for all tracks
         }
     }
 
@@ -400,11 +535,15 @@ class PlaybackFragment : Fragment() {
                     marginEnd = dpToPx(12)
                 }
                 
-                // Use gradient for ramp blocks, solid color otherwise
+                // Use gradient for ramp blocks, solid color otherwise - both with rounded corners
+                val cornerRadius = dpToPx(8).toFloat()
                 if (isRampBlock) {
                     background = createGradientDrawable(powerLow, powerHigh)
                 } else {
-                    setBackgroundColor(powerZoneColor)
+                    background = android.graphics.drawable.GradientDrawable().apply {
+                        setColor(powerZoneColor)
+                        this.cornerRadius = cornerRadius
+                    }
                 }
                 
                 setPadding(dpToPx(12), dpToPx(12), dpToPx(12), dpToPx(12))
@@ -509,6 +648,72 @@ class PlaybackFragment : Fragment() {
         }
     }
 
+    /**
+     * Helper function to play a track with multiple fallback strategies
+     * Some tracks may fail with full URI but work with just the track ID
+     */
+    private fun playTrackWithFallback(trackUri: String, trackName: String, onSuccess: () -> Unit, onError: (String) -> Unit) {
+        val activity = requireActivity() as MainActivity
+        val playerApi = activity.spotifyAppRemote?.playerApi ?: run {
+            onError("Spotify not connected")
+            return
+        }
+        
+        // Log detailed URI information for debugging
+        Log.d(TAG, "🔍 URI details for '$trackName':")
+        Log.d(TAG, "   URI string: '$trackUri'")
+        Log.d(TAG, "   URI length: ${trackUri.length}")
+        Log.d(TAG, "   URI bytes: ${trackUri.toByteArray().joinToString(", ") { it.toString() }}")
+        Log.d(TAG, "   URI chars: ${trackUri.map { it.code }.joinToString(", ")}")
+        
+        // Extract track ID (format: spotify:track:ID)
+        val trackId = if (trackUri.startsWith("spotify:track:")) {
+            trackUri.substringAfterLast(":")
+        } else {
+            trackUri
+        }
+        
+        Log.d(TAG, "   Track ID: '$trackId'")
+        
+        // Try playing with full URI first
+        Log.d(TAG, "🎵 Attempt 1: Playing with full URI")
+        playerApi.play(trackUri)
+            .setResultCallback {
+                Log.d(TAG, "✅ Success with full URI")
+                onSuccess()
+            }
+            .setErrorCallback { error ->
+                Log.w(TAG, "⚠️ Failed with full URI: ${error.message}")
+                // Try with just track ID
+                Log.d(TAG, "🎵 Attempt 2: Playing with track ID only")
+                playerApi.play(trackId)
+                    .setResultCallback {
+                        Log.d(TAG, "✅ Success with track ID")
+                        onSuccess()
+                    }
+                    .setErrorCallback { idError ->
+                        Log.w(TAG, "⚠️ Failed with track ID: ${idError.message}")
+                        // Try reconstructing URI
+                        val reconstructedUri = "spotify:track:$trackId"
+                        if (reconstructedUri != trackUri) {
+                            Log.d(TAG, "🎵 Attempt 3: Playing with reconstructed URI")
+                            playerApi.play(reconstructedUri)
+                                .setResultCallback {
+                                    Log.d(TAG, "✅ Success with reconstructed URI")
+                                    onSuccess()
+                                }
+                                .setErrorCallback { reconError ->
+                                    Log.e(TAG, "❌ All attempts failed. Last error: ${reconError.message}")
+                                    onError(reconError.message ?: "Unknown error")
+                                }
+                        } else {
+                            Log.e(TAG, "❌ All attempts failed. Last error: ${idError.message}")
+                            onError(idError.message ?: "Unknown error")
+                        }
+                    }
+            }
+    }
+    
     private fun startPlayback() {
         val activity = requireActivity() as MainActivity
         val tracks = activity.currentPlaylist
@@ -530,7 +735,6 @@ class PlaybackFragment : Fragment() {
         }
 
         isPlaying = true
-        currentTrackIndex = 0
         playButton.isEnabled = false
         pauseButton.isEnabled = true
         
@@ -557,23 +761,158 @@ class PlaybackFragment : Fragment() {
         }
 
         val firstTrack = tracks[0]
-        activity.spotifyAppRemote!!.playerApi.play(firstTrack.trackUri)
-            .setResultCallback {
-                Log.d(TAG, "▶️ Started playback: ${firstTrack.blockName}")
+        Log.d(TAG, "🎵 Attempting to start playback: ${firstTrack.blockName} (URI: ${firstTrack.trackUri})")
+        playTrackWithFallback(
+            trackUri = firstTrack.trackUri,
+            trackName = firstTrack.blockName,
+            onSuccess = {
+                Log.d(TAG, "✅ Play API call succeeded for: ${firstTrack.blockName}")
                 spotifyCurrentTrackUri = firstTrack.trackUri  // Spotify is now playing this track
+                // Set current track index and update display only after playback actually starts
+                currentTrackIndex = 0
+                updateTrackDisplay()
+                
+                // Verify playback actually started by checking player state after a delay
+                // Use longer delay to allow Spotify time to load track metadata
+                Handler(Looper.getMainLooper()).postDelayed({
+                    try {
+                        activity.spotifyAppRemote?.playerApi?.playerState?.setResultCallback { playerState ->
+                            val currentUri = playerState.track?.uri
+                            val playerIsPlaying = playerState.isPaused.not()
+                            val trackName = playerState.track?.name
+                            Log.d(TAG, "🔍 Initial playback verification - URI: $currentUri, Track: $trackName, isPlaying: $playerIsPlaying")
+                            
+                            // If track URI is null but player is playing, wait a bit more and check again
+                            if (currentUri == null && playerIsPlaying) {
+                                Log.w(TAG, "⚠️ Track metadata not loaded yet, checking again in 1 second...")
+                                Handler(Looper.getMainLooper()).postDelayed({
+                                    activity.spotifyAppRemote?.playerApi?.playerState?.setResultCallback { retryState ->
+                                        val retryUri = retryState.track?.uri
+                                        val retryIsPlaying = retryState.isPaused.not()
+                                        val retryTrackName = retryState.track?.name
+                                        Log.d(TAG, "🔍 Retry verification - URI: $retryUri, Track: $retryTrackName, isPlaying: $retryIsPlaying")
+                                        
+                                        if (retryUri != firstTrack.trackUri) {
+                                            Log.w(TAG, "⚠️ Track still mismatch after retry! Expected: ${firstTrack.trackUri}, Got: $retryUri")
+                                            // Final retry of playback - pause first, then play
+                                            Log.d(TAG, "🔄 Final retry initial playback for: ${firstTrack.blockName} (pausing first)")
+                                            activity.spotifyAppRemote?.playerApi?.pause()
+                                            Handler(Looper.getMainLooper()).postDelayed({
+                                                activity.spotifyAppRemote?.playerApi?.play(firstTrack.trackUri)
+                                                    ?.setResultCallback {
+                                                        Log.d(TAG, "✅ Final retry successful for: ${firstTrack.blockName}")
+                                                        spotifyCurrentTrackUri = firstTrack.trackUri
                 // Only start timer if not already running (to preserve workout start time)
                 if (workoutStartTimeMs == 0L) {
                     startWorkoutTimer(tracks)
                 }
             }
-            .setErrorCallback { error ->
-                Log.e(TAG, "❌ Playback error: ${error.message}")
+                                                    ?.setErrorCallback { retryError ->
+                                                        Log.e(TAG, "❌ Final retry failed: ${retryError.message}")
+                                                        playButton.isEnabled = true
+                                                        pauseButton.isEnabled = false
+                                                        isPlaying = false
+                                                        currentTrackIndex = -1
+                                                        activity.isWorkoutPlaying = false
+                                                        activity.window.clearFlags(android.view.WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+                                                        updateTrackDisplay()
+                                                    }
+                                            }, 200) // Wait 200ms after pause
+                                        } else if (!retryIsPlaying) {
+                                            Log.w(TAG, "⚠️ Track loaded but not playing. Resuming...")
+                                            activity.spotifyAppRemote?.playerApi?.resume()
+                                            spotifyCurrentTrackUri = firstTrack.trackUri
+                                            // Only start timer if not already running (to preserve workout start time)
+                                            if (workoutStartTimeMs == 0L) {
+                                                startWorkoutTimer(tracks)
+                                            }
+                                        } else {
+                                            Log.d(TAG, "✅ Playback verified after retry: ${firstTrack.blockName} is playing")
+                                            spotifyCurrentTrackUri = firstTrack.trackUri
+                                            // Only start timer if not already running (to preserve workout start time)
+                                            if (workoutStartTimeMs == 0L) {
+                                                startWorkoutTimer(tracks)
+                                            }
+                                        }
+                                    }
+                                    ?.setErrorCallback { retryStateError ->
+                                        Log.e(TAG, "❌ Failed to get retry player state: ${retryStateError.message}")
+                                        // Still start timer even if verification fails
+                                        if (workoutStartTimeMs == 0L) {
+                                            startWorkoutTimer(tracks)
+                                        }
+                                    }
+                                }, 1000) // Wait 1 more second
+                            } else if (currentUri != firstTrack.trackUri) {
+                                Log.w(TAG, "⚠️ Track mismatch! Expected: ${firstTrack.trackUri}, Got: $currentUri")
+                                // Retry playback - pause first, then play
+                                Log.d(TAG, "🔄 Retrying initial playback for: ${firstTrack.blockName} (pausing first)")
+                                activity.spotifyAppRemote?.playerApi?.pause()
+                                Handler(Looper.getMainLooper()).postDelayed({
+                                    activity.spotifyAppRemote?.playerApi?.play(firstTrack.trackUri)
+                                        ?.setResultCallback {
+                                            Log.d(TAG, "✅ Retry successful for: ${firstTrack.blockName}")
+                                            spotifyCurrentTrackUri = firstTrack.trackUri
+                                            // Only start timer if not already running (to preserve workout start time)
+                                            if (workoutStartTimeMs == 0L) {
+                                                startWorkoutTimer(tracks)
+                                            }
+                                        }
+                                        ?.setErrorCallback { retryError ->
+                                            Log.e(TAG, "❌ Retry failed: ${retryError.message}")
+                                            playButton.isEnabled = true
+                                            pauseButton.isEnabled = false
+                                            isPlaying = false
+                                            currentTrackIndex = -1
+                                            activity.isWorkoutPlaying = false
+                                            activity.window.clearFlags(android.view.WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+                                            updateTrackDisplay()
+                                        }
+                                }, 200) // Wait 200ms after pause
+                            } else if (!playerIsPlaying) {
+                                Log.w(TAG, "⚠️ Track loaded but not playing. Resuming...")
+                                activity.spotifyAppRemote?.playerApi?.resume()
+                                spotifyCurrentTrackUri = firstTrack.trackUri
+                                // Only start timer if not already running (to preserve workout start time)
+                                if (workoutStartTimeMs == 0L) {
+                                    startWorkoutTimer(tracks)
+                                }
+                            } else {
+                                Log.d(TAG, "✅ Playback verified: ${firstTrack.blockName} is playing")
+                                spotifyCurrentTrackUri = firstTrack.trackUri
+                                // Only start timer if not already running (to preserve workout start time)
+                                if (workoutStartTimeMs == 0L) {
+                                    startWorkoutTimer(tracks)
+                                }
+                            }
+                        }
+                        ?.setErrorCallback { stateError ->
+                            Log.e(TAG, "❌ Failed to get player state: ${stateError.message}")
+                            // Still start timer even if verification fails
+                            if (workoutStartTimeMs == 0L) {
+                                startWorkoutTimer(tracks)
+                            }
+                        }
+                    } catch (e: Exception) {
+                        Log.e(TAG, "❌ Error verifying playback state", e)
+                        // Still start timer even if verification fails
+                        if (workoutStartTimeMs == 0L) {
+                            startWorkoutTimer(tracks)
+                        }
+                    }
+                }, 1500) // Check after 1.5 seconds to allow track metadata to load
+            },
+            onError = { errorMessage ->
+                Log.e(TAG, "❌ Playback error for ${firstTrack.blockName}: $errorMessage")
                 playButton.isEnabled = true
                 pauseButton.isEnabled = false
                 isPlaying = false
+                currentTrackIndex = -1  // Reset to no track selected
                 activity.isWorkoutPlaying = false
                 activity.window.clearFlags(android.view.WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+                updateTrackDisplay()  // Update to remove highlight
             }
+        )
     }
 
     private fun pausePlayback() {
@@ -595,8 +934,10 @@ class PlaybackFragment : Fragment() {
         activity.spotifyAppRemote?.playerApi?.pause()
         stopWorkoutTimer()
         isPlaying = false
+        currentTrackIndex = -1  // Reset to no track selected
         activity.isWorkoutPlaying = false
         activity.window.clearFlags(android.view.WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+        updateTrackDisplay()  // Update to remove highlight
         
         // Release WakeLock so CPU can sleep normally
         try {
@@ -615,7 +956,13 @@ class PlaybackFragment : Fragment() {
         // CRITICAL FIX: Record absolute workout start time
         // This prevents timing drift across track transitions by using absolute time
         // instead of per-track elapsed time
-        workoutStartTimeMs = System.currentTimeMillis()
+        // Only set if not already set (e.g., from saved state)
+        if (workoutStartTimeMs == 0L) {
+            workoutStartTimeMs = System.currentTimeMillis()
+            Log.d(TAG, "⏱️ Started new workout timer: $workoutStartTimeMs")
+        } else {
+            Log.d(TAG, "⏱️ Resuming workout timer: $workoutStartTimeMs")
+        }
         
         workoutTimerRunnable = object : Runnable {
             private var isFading = false
@@ -647,17 +994,150 @@ class PlaybackFragment : Fragment() {
                         // Use fade transition when switching tracks
                         if (activity.spotifyAppRemote != null && activity.isAppRemoteConnected) {
                             volumeTransitionManager?.fadeOutThenIn {
-                                activity.spotifyAppRemote!!.playerApi.play(nextTrack.trackUri)
-                                    .setResultCallback {
+                                Log.d(TAG, "🎵 Attempting to play: ${nextTrack.blockName} (URI: ${nextTrack.trackUri})")
+                                // Pause current playback first to ensure clean transition
+                                activity.spotifyAppRemote?.playerApi?.pause()
+                                // Small delay to ensure fade-out and pause are complete before starting new track
+                                Handler(Looper.getMainLooper()).postDelayed({
+                                    playTrackWithFallback(
+                                        trackUri = nextTrack.trackUri,
+                                        trackName = nextTrack.blockName,
+                                        onSuccess = {
+                                            Log.d(TAG, "✅ Play API call succeeded for: ${nextTrack.blockName}")
                                         spotifyCurrentTrackUri = nextTrack.trackUri  // Spotify now playing this track
-                                    }
-                                    .setErrorCallback { error ->
-                                        Log.e(TAG, "❌ Playback error: ${error.message}")
-                                        if (error.message?.contains("not connected", ignoreCase = true) == true) {
+                                        
+                                        // Verify playback actually started by checking player state after a delay
+                                        // Use longer delay to allow Spotify time to load track metadata
+                                        Handler(Looper.getMainLooper()).postDelayed({
+                                            try {
+                                                activity.spotifyAppRemote?.playerApi?.playerState?.setResultCallback { playerState ->
+                                                    val currentUri = playerState.track?.uri
+                                                    val playerIsPlaying = playerState.isPaused.not()
+                                                    val trackName = playerState.track?.name
+                                                    Log.d(TAG, "🔍 Playback verification - URI: $currentUri, Track: $trackName, isPlaying: $playerIsPlaying")
+                                                    
+                                                    // If track URI is null but player is playing, wait a bit more and check again
+                                                    if (currentUri == null && playerIsPlaying) {
+                                                        Log.w(TAG, "⚠️ Track metadata not loaded yet, checking again in 1 second...")
+                                                        Handler(Looper.getMainLooper()).postDelayed({
+                                                            activity.spotifyAppRemote?.playerApi?.playerState?.setResultCallback { retryState ->
+                                                                val retryUri = retryState.track?.uri
+                                                                val retryIsPlaying = retryState.isPaused.not()
+                                                                val retryTrackName = retryState.track?.name
+                                                                Log.d(TAG, "🔍 Retry verification - URI: $retryUri, Track: $retryTrackName, isPlaying: $retryIsPlaying")
+                                                                
+                                                                if (retryUri != nextTrack.trackUri) {
+                                                                    Log.w(TAG, "⚠️ Track still mismatch after retry! Expected: ${nextTrack.trackUri}, Got: $retryUri")
+                                                                    // Final retry of playback - pause first, then play
+                                                                    Log.d(TAG, "🔄 Final retry playback for: ${nextTrack.blockName} (pausing first)")
+                                                                    activity.spotifyAppRemote?.playerApi?.pause()
+                                                                    Handler(Looper.getMainLooper()).postDelayed({
+                                                                        activity.spotifyAppRemote?.playerApi?.play(nextTrack.trackUri)
+                                                                            ?.setResultCallback {
+                                                                                Log.d(TAG, "✅ Final retry successful for: ${nextTrack.blockName}")
+                                                                                spotifyCurrentTrackUri = nextTrack.trackUri
+                                                                                // Verify one more time after final retry
+                                                                                Handler(Looper.getMainLooper()).postDelayed({
+                                                                                    activity.spotifyAppRemote?.playerApi?.playerState?.setResultCallback { finalState ->
+                                                                                        val finalUri = finalState.track?.uri
+                                                                                        Log.d(TAG, "🔍 Final verification - URI: $finalUri")
+                                                                                        if (finalUri == nextTrack.trackUri) {
+                                                                                            Log.d(TAG, "✅ Track confirmed playing: ${nextTrack.blockName}")
+                                                                                        } else {
+                                                                                            Log.w(TAG, "⚠️ Track still not confirmed after final retry - will continue with workout timing")
+                                                                                            // Don't skip - keep timing correct, track may play later or be silent
+                                                                                        }
+                                                                                    }
+                                                                                }, 1000)
+                                                                            }
+                                                                            ?.setErrorCallback { retryError ->
+                                                                                Log.e(TAG, "❌ Final retry failed: ${retryError.message}")
+                                                                                Log.w(TAG, "⚠️ Track failed to play: ${nextTrack.blockName} - workout timing will continue")
+                                                                                // Don't skip - keep workout timing correct, track may be silent
+                                                                            }
+                                                                    }, 200) // Wait 200ms after pause
+                                                                } else if (!retryIsPlaying) {
+                                                                    Log.w(TAG, "⚠️ Track loaded but not playing. Resuming...")
+                                                                    activity.spotifyAppRemote?.playerApi?.resume()
+                                                                    // Verify resume worked after a delay
+                                                                    Handler(Looper.getMainLooper()).postDelayed({
+                                                                        activity.spotifyAppRemote?.playerApi?.playerState?.setResultCallback { resumeState ->
+                                                                            val resumeUri = resumeState.track?.uri
+                                                                            val resumeIsPlaying = resumeState.isPaused.not()
+                                                                            if (resumeUri == nextTrack.trackUri && resumeIsPlaying) {
+                                                                                Log.d(TAG, "✅ Track playing after resume: ${nextTrack.blockName}")
+                                                                                spotifyCurrentTrackUri = nextTrack.trackUri
+                                                                            } else {
+                                                                                Log.w(TAG, "⚠️ Track still not playing after resume: ${nextTrack.blockName} - workout timing will continue")
+                                                                                // Don't skip - keep workout timing correct
+                                                                            }
+                                                                        }
+                                                                    }, 500)
+                                                                } else {
+                                                                    Log.d(TAG, "✅ Playback verified after retry: ${nextTrack.blockName} is playing")
+                                                                    spotifyCurrentTrackUri = nextTrack.trackUri
+                                                                }
+                                                            }
+                                                            ?.setErrorCallback { retryStateError ->
+                                                                Log.e(TAG, "❌ Failed to get retry player state: ${retryStateError.message}")
+                                                            }
+                                                        }, 1000) // Wait 1 more second
+                                                    } else if (currentUri != nextTrack.trackUri) {
+                                                        Log.w(TAG, "⚠️ Track mismatch! Expected: ${nextTrack.trackUri}, Got: $currentUri")
+                                                        // Retry playback - pause first, then play
+                                                        Log.d(TAG, "🔄 Retrying playback for: ${nextTrack.blockName} (pausing first)")
+                                                        activity.spotifyAppRemote?.playerApi?.pause()
+                                                        Handler(Looper.getMainLooper()).postDelayed({
+                                                            activity.spotifyAppRemote?.playerApi?.play(nextTrack.trackUri)
+                                                                ?.setResultCallback {
+                                                                    Log.d(TAG, "✅ Retry successful for: ${nextTrack.blockName}")
+                                                                    spotifyCurrentTrackUri = nextTrack.trackUri
+                                                                }
+                                                                ?.setErrorCallback { retryError ->
+                                                                    Log.e(TAG, "❌ Retry failed: ${retryError.message}")
+                                                                    Log.w(TAG, "⚠️ Track failed to play: ${nextTrack.blockName} - workout timing will continue")
+                                                                    // Don't skip - keep workout timing correct
+                                                                }
+                                                        }, 200) // Wait 200ms after pause
+                                                    } else if (!playerIsPlaying) {
+                                                        Log.w(TAG, "⚠️ Track loaded but not playing. Resuming...")
+                                                        activity.spotifyAppRemote?.playerApi?.resume()
+                                                        // Verify resume worked after a delay
+                                                        Handler(Looper.getMainLooper()).postDelayed({
+                                                            activity.spotifyAppRemote?.playerApi?.playerState?.setResultCallback { resumeState ->
+                                                                val resumeUri = resumeState.track?.uri
+                                                                val resumeIsPlaying = resumeState.isPaused.not()
+                                                                if (resumeUri == nextTrack.trackUri && resumeIsPlaying) {
+                                                                    Log.d(TAG, "✅ Track playing after resume: ${nextTrack.blockName}")
+                                                                    spotifyCurrentTrackUri = nextTrack.trackUri
+                                                                } else {
+                                                                    Log.w(TAG, "⚠️ Track still not playing after resume: ${nextTrack.blockName} - workout timing will continue")
+                                                                    // Don't skip - keep workout timing correct
+                                                                }
+                                                            }
+                                                        }, 500)
+                                                    } else {
+                                                        Log.d(TAG, "✅ Playback verified: ${nextTrack.blockName} is playing")
+                                                        spotifyCurrentTrackUri = nextTrack.trackUri
+                                                    }
+                                                }
+                                                ?.setErrorCallback { stateError ->
+                                                    Log.e(TAG, "❌ Failed to get player state: ${stateError.message}")
+                                                }
+                                            } catch (e: Exception) {
+                                                Log.e(TAG, "❌ Error verifying playback state", e)
+                                            }
+                                        }, 1500) // Check after 1.5 seconds to allow track metadata to load
+                                        },
+                                        onError = { errorMessage ->
+                                            Log.e(TAG, "❌ Playback error for ${nextTrack.blockName}: $errorMessage")
+                                            if (errorMessage.contains("not connected", ignoreCase = true)) {
                                             Log.w(TAG, "⚠️ Spotify disconnected - attempting reconnection...")
                                             activity.connectToSpotifyAppRemote()
                                         }
                                     }
+                                    )
+                                }, 100) // Small delay to ensure fade-out completes
                             }
                         } else {
                             Log.w(TAG, "⚠️ Spotify not connected, skipping track transition")
@@ -680,6 +1160,7 @@ class PlaybackFragment : Fragment() {
         workoutTimerRunnable?.let { workoutTimerHandler?.removeCallbacks(it) }
         workoutTimerRunnable = null
     }
+    
 
     private fun updateTrackDisplay() {
         val activity = requireActivity() as MainActivity
@@ -703,18 +1184,16 @@ class PlaybackFragment : Fragment() {
             
             // Get power from the workout block for color coding
             val powerPercent = getPowerForTrack(track)
-            val powerZoneColor = if (index == currentTrackIndex) {
-                android.graphics.Color.parseColor("#6200EE")  // Current track highlight
-            } else {
-                getPowerZoneColor(powerPercent)
-            }
+            val powerZoneColor = getPowerZoneColor(powerPercent)
+            // Only highlight if actually playing and this is the current track
+            val isCurrentTrack = isPlaying && index == currentTrackIndex && currentTrackIndex >= 0
             
             // Determine if this is a ramp block (needs gradient)
             var isRampBlock = false
             var powerLow = 0
             var powerHigh = 0
             
-            if (index != currentTrackIndex && activity.currentWorkout != null) {
+            if (!isCurrentTrack && activity.currentWorkout != null) {
                 var cumulativeTimeMs = 0
                 for (block in activity.currentWorkout!!.blocks) {
                     val blockStartMs = cumulativeTimeMs
@@ -746,10 +1225,12 @@ class PlaybackFragment : Fragment() {
             }
             
             // Determine text color based on background brightness
-            val textColor = if (index == currentTrackIndex || powerPercent < 76) {
-                android.graphics.Color.WHITE
-            } else {
-                android.graphics.Color.BLACK
+            // Yellow (90-105) and Orange (105-119) need black text, others use white
+            val textColor = when {
+                // Yellow and Orange zones always use black text for readability
+                powerPercent >= 90 && powerPercent < 119 -> android.graphics.Color.BLACK
+                // Other zones use white text
+                else -> android.graphics.Color.WHITE
             }
             
             val containerLayout = LinearLayout(requireContext()).apply {
@@ -763,11 +1244,27 @@ class PlaybackFragment : Fragment() {
                     marginEnd = dpToPx(12)
                 }
                 
-                // Use gradient for ramp blocks (only when not current track), solid color otherwise
-                if (isRampBlock && index != currentTrackIndex) {
-                    background = createGradientDrawable(powerLow, powerHigh)
+                // Set background - use gradient for ramp blocks (only when not current track)
+                val cornerRadius = dpToPx(8).toFloat()
+                val backgroundDrawable = if (isRampBlock && !isCurrentTrack) {
+                    createGradientDrawable(powerLow, powerHigh)
                 } else {
-                    setBackgroundColor(powerZoneColor)
+                    android.graphics.drawable.GradientDrawable().apply {
+                        setColor(powerZoneColor)
+                        this.cornerRadius = cornerRadius
+                    }
+                }
+                
+                // Add border for current track (dark grey border for visibility)
+                if (isCurrentTrack) {
+                    val borderDrawable = android.graphics.drawable.GradientDrawable().apply {
+                        setColor(powerZoneColor)
+                        this.cornerRadius = cornerRadius
+                        setStroke(dpToPx(4), android.graphics.Color.parseColor("#424242")) // Dark grey border
+                    }
+                    background = borderDrawable
+                } else {
+                    background = backgroundDrawable
                 }
                 
                 setPadding(dpToPx(12), dpToPx(12), dpToPx(12), dpToPx(12))
@@ -854,6 +1351,29 @@ class PlaybackFragment : Fragment() {
             })
             
             tracksContainer.addView(containerLayout)
+        }
+        
+        // Scroll to current track if available and actually playing
+        if (isPlaying && currentTrackIndex >= 0 && currentTrackIndex < tracks.size) {
+            scrollToCurrentTrack()
+        }
+    }
+    
+    /**
+     * Scroll the list to make the current track visible
+     */
+    private fun scrollToCurrentTrack() {
+        if (currentTrackIndex < 0 || currentTrackIndex >= tracksContainer.childCount) {
+            return
+        }
+        
+        val currentTrackView = tracksContainer.getChildAt(currentTrackIndex)
+        if (currentTrackView != null) {
+            // Post to ensure layout is complete
+            tracksScrollView.post {
+                val scrollY = currentTrackView.top - tracksScrollView.height / 2 + currentTrackView.height / 2
+                tracksScrollView.smoothScrollTo(0, scrollY.coerceAtLeast(0))
+            }
         }
     }
 
